@@ -497,8 +497,9 @@
        updateDayNight so the night battlefield actually becomes navigable. -->
   <div id="nvg-overlay" style="display:none;position:fixed;inset:0;z-index:6;pointer-events:none;
     background:
-      repeating-linear-gradient(0deg, rgba(0,0,0,0.10) 0px, rgba(0,0,0,0.10) 1px, transparent 1px, transparent 3px),
-      radial-gradient(ellipse at center, rgba(40,255,100,0.22) 0%, rgba(12,150,50,0.12) 55%, rgba(0,18,6,0.92) 100%);"></div>
+      repeating-linear-gradient(0deg, rgba(0,0,0,0.14) 0px, rgba(0,0,0,0.08) 1px, transparent 1px, transparent 2px),
+      radial-gradient(ellipse at center, rgba(50,255,110,0.18) 0%, rgba(8,180,60,0.10) 50%, rgba(0,20,6,0.88) 100%);
+    mix-blend-mode: screen;"></div>
   <!-- Stats panel (visible after death / on TAB) -->
   <div id="statsPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.92);border:2px solid #ff3a3a;padding:30px 50px;font:600 14px/1.4 system-ui,sans-serif;letter-spacing:1.5px;z-index:50;min-width:380px">
     <div style="font:700 22px/1 system-ui,sans-serif;color:#ff5050;text-align:center;letter-spacing:3px;margin-bottom:18px">СТАТИСТИКА</div>
@@ -6952,7 +6953,8 @@ function _updateSuppressorVisual() {
  * day/night value each frame). */
 function _updateNvgVisual() {
   const ov = document.getElementById('nvg-overlay');
-  if (ov) ov.style.display = (player.inv.hasNVG && player.nvgOn) ? 'block' : 'none';
+  const on = player.inv.hasNVG && player.nvgOn;
+  if (ov) ov.style.display = on ? 'block' : 'none';
   const slot = document.getElementById('slot-nvg');
   if (slot) slot.style.display = player.inv.hasNVG ? '' : 'none';
   const st = document.getElementById('nvg-status');
@@ -6960,7 +6962,27 @@ function _updateNvgVisual() {
     st.textContent = player.nvgOn ? 'ON' : 'OFF';
     st.style.color = player.nvgOn ? '#66ff66' : '#ff6666';
   }
+  /* NVG hum — low electronic whine when goggles are active */
+  if (on && !_nvgHumNode && audioCtx) {
+    const ctx = audioCtx;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = 2800 + Math.random() * 400;
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'sine';
+    osc2.frequency.value = 6200 + Math.random() * 800;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 4000;
+    const g = ctx.createGain(); g.gain.value = 0.015;
+    osc.connect(lp); osc2.connect(lp); lp.connect(g);
+    g.connect(audioBus ? audioBus.preMaster : ctx.destination);
+    osc.start(); osc2.start();
+    _nvgHumNode = { osc, osc2, g };
+  } else if (!on && _nvgHumNode) {
+    try { _nvgHumNode.osc.stop(); _nvgHumNode.osc2.stop(); } catch(_){}
+    _nvgHumNode = null;
+  }
 }
+let _nvgHumNode = null;
 
 /* Smoke puff after each shot — spawned in WORLD space at the muzzle so it
  * drifts independently of gun movement. Two layers:
@@ -8456,19 +8478,74 @@ function playReloadM416() {
   _foleyHit(now + 1.32, { dur: 0.06, decay: 100, peakFreq: 1700, peakGain: 7, hp: 500, lp: 8500, vol: 0.28 });
 }
 
+/* Surface-aware footsteps: detect what's under the player and pick the
+ * matching procedural sound profile. Surfaces: dirt/grass (default), metal
+ * (tanks/containers), concrete (jersey barriers/bunkers), wood (cabin floor). */
+function _detectFootSurface() {
+  /* Simple proximity heuristic — cast a short downward ray and check the
+   * nearest obstacle type. Falls back to 'dirt' if nothing found. */
+  if (typeof colliders === 'undefined' || !colliders.length) return 'dirt';
+  const px = player.position.x, pz = player.position.z;
+  const py = player.position.y - player.eyeHeight;  /* foot level */
+  for (const c of colliders) {
+    if (px > c.minX && px < c.maxX && pz > c.minZ && pz < c.maxZ) {
+      const top = (c.maxY !== undefined) ? c.maxY : (py + 0.5);
+      if (Math.abs(py - top) < 0.25) {
+        /* Determine type from the collider's associated mesh material */
+        const obj = c.obj;
+        if (obj && obj.material) {
+          const col = obj.material.color ? obj.material.color.getHex() : 0;
+          if (col === 0x1a1a1a || col === 0x18181a || col === 0x141414) return 'metal';
+          if (col === 0xb8b6ae || col === 0x9c9890 || col === 0x807a72) return 'concrete';
+          if (col === 0x8a5a2e || col === 0x5a3a1c || col === 0x6a4a26) return 'wood';
+        }
+      }
+    }
+  }
+  return 'dirt';
+}
+
 function playFootstep() {
   if (!audioCtx) return;
   const ctx = audioCtx; const now = ctx.currentTime;
-  const dur = 0.12;
-  const buf = ctx.createBuffer(1, ctx.sampleRate * dur, ctx.sampleRate);
+  const surface = _detectFootSurface();
+  const dur = surface === 'metal' ? 0.09 : (surface === 'concrete' ? 0.10 : 0.13);
+  const buf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * dur), ctx.sampleRate);
   const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) {
-    const t = i / ctx.sampleRate;
-    d[i] = (Math.random()*2 - 1) * Math.exp(-t * 25) * 0.5;
+  if (surface === 'metal') {
+    /* Metal clang: sharp transient with bright ringing */
+    for (let i = 0; i < d.length; i++) {
+      const t = i / ctx.sampleRate;
+      d[i] = (Math.random()*2-1) * Math.exp(-t*40) * 0.6 +
+             Math.sin(t * 2200 * Math.PI * 2) * Math.exp(-t*30) * 0.25;
+    }
+  } else if (surface === 'concrete') {
+    /* Concrete: hard dry thud, slightly muffled */
+    for (let i = 0; i < d.length; i++) {
+      const t = i / ctx.sampleRate;
+      d[i] = (Math.random()*2-1) * Math.exp(-t*30) * 0.55;
+    }
+  } else if (surface === 'wood') {
+    /* Wood: hollow thump with resonance */
+    for (let i = 0; i < d.length; i++) {
+      const t = i / ctx.sampleRate;
+      d[i] = (Math.random()*2-1) * Math.exp(-t*18) * 0.45 +
+             Math.sin(t * 180 * Math.PI * 2) * Math.exp(-t*22) * 0.30;
+    }
+  } else {
+    /* Dirt/grass: muffled soft thud */
+    for (let i = 0; i < d.length; i++) {
+      const t = i / ctx.sampleRate;
+      d[i] = (Math.random()*2 - 1) * Math.exp(-t * 25) * 0.5;
+    }
   }
   const src = ctx.createBufferSource(); src.buffer = buf;
-  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 600;
-  const g = ctx.createGain(); g.gain.value = 0.25;
+  /* Per-surface filter */
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = surface === 'metal' ? 3500 : (surface === 'concrete' ? 900 : (surface === 'wood' ? 700 : 600));
+  const g = ctx.createGain();
+  g.gain.value = surface === 'metal' ? 0.30 : (surface === 'concrete' ? 0.28 : 0.25);
   src.connect(lp).connect(g).connect(ctx.destination);
   src.start(now);
 }
@@ -8710,7 +8787,7 @@ const WEAPON_STATS = {
   /* M870 — pump shotgun. Fires `pellets` projectiles per trigger pull in a
    * wide cone; each pellet does baseDamage. Slow pump cadence, short range. */
   m870:   { name: 'M870', slot: 'special', magSize: 6, fireRate: 0.85, reloadDuration: 3.6,
-            baseDamage: 0.34, reserveStart: 0, recoilVert: 0.070, recoilHoriz: 0.0140,
+            baseDamage: 0.34, reserveStart: 0, recoilVert: 0.120, recoilHoriz: 0.0180,
             weight: 3.6, adsTime: 0.30, muzzleVel: 400, energyJ: 700, zeroDist: 20,
             pellets: 9, pelletSpread: 0.055,
             adsX: 0, adsY: -0.078, adsZ: -0.130, adsRotX: -0.0080 }
@@ -8823,10 +8900,11 @@ const RECOIL_PATTERN_SVD = [
   [-0.07, 1.30], [ 0.07, 1.30], [-0.08, 1.30], [ 0.08, 1.30],
   [-0.08, 1.30], [ 0.08, 1.30]
 ];
-/* M870 — one massive kick per pump; horizontal barely matters. */
+/* M870 — one MASSIVE kick per pump; the shotgun hits back HARD.
+ * Vertical: 2.2× AKM (0.024 → 0.055). Push multiplied further in shoot(). */
 const RECOIL_PATTERN_M870 = [
-  [ 0.00, 1.60], [ 0.06, 1.60], [-0.06, 1.60], [ 0.06, 1.60],
-  [-0.06, 1.60], [ 0.06, 1.60]
+  [ 0.00, 2.40], [ 0.08, 2.40], [-0.08, 2.40], [ 0.08, 2.40],
+  [-0.08, 2.40], [ 0.08, 2.40]
 ];
 const RECOIL_PATTERN_PISTOL = [
   [ 0.00, 1.00], [ 0.06, 1.05], [-0.08, 1.05], [ 0.10, 1.00],
@@ -9914,8 +9992,11 @@ function shoot() {
     if (typeof showNotice === 'function') showNotice('СТВОЛ ЗАГРЯЗНЁН — ПЕРЕЗАРЯДИ (R)');
     setTimeout(() => { player._dirtWarned = false; }, 6000);
   }
-  /* Camera shake — tiny on each shot, scaled by hip vs ADS */
-  if (typeof pushCamShake === 'function') pushCamShake(player.isAiming ? 0.005 : 0.014);
+  /* Camera shake — larger for shotgun (it KICKS) */
+  if (typeof pushCamShake === 'function') {
+    const isShot = player.activeWeapon === 'm870';
+    pushCamShake(isShot ? (player.isAiming ? 0.055 : 0.10) : (player.isAiming ? 0.005 : 0.014));
+  }
 
   /* Muzzle flash (suppressed: very dim, no visible flash) */
   if (player.suppressorOn) {
@@ -10189,12 +10270,31 @@ function updateBullets(dt) {
           b.pos.copy(envHit.point).addScaledVector(refl, 0.05);
           b.energyJ *= 0.5;
           b._ricocheted = true;
-          /* small ricochet 'tink' */
-          if (audioCtx && typeof _foleyHit === 'function') {
-            _foleyHit(audioCtx.currentTime, {
-              dur: 0.10, decay: 40, peakFreq: 3500, peakGain: 14,
-              hp: 1500, lp: 9000, vol: 0.32
-            });
+          /* Ricochet: sharp metallic PING + descending whine (the classic
+           * "zing" of a bullet grazing steel) */
+          if (audioCtx) {
+            const rCtx = audioCtx; const rNow = rCtx.currentTime;
+            /* Transient hit */
+            if (typeof _foleyHit === 'function') {
+              _foleyHit(rNow, { dur: 0.06, decay: 80, peakFreq: 5800, peakGain: 18,
+                                hp: 2000, lp: 14000, vol: 0.35 });
+            }
+            /* Descending metallic whine */
+            try {
+              const wo = rCtx.createOscillator(); wo.type = 'sawtooth';
+              wo.frequency.setValueAtTime(4200, rNow);
+              wo.frequency.exponentialRampToValueAtTime(800, rNow + 0.22);
+              const wg = rCtx.createGain();
+              wg.gain.setValueAtTime(0.28, rNow);
+              wg.gain.exponentialRampToValueAtTime(0.001, rNow + 0.24);
+              const wlp = rCtx.createBiquadFilter(); wlp.type = 'lowpass'; wlp.frequency.value = 6000;
+              wo.connect(wlp).connect(wg).connect(audioBus ? audioBus.preMaster : rCtx.destination);
+              wo.start(rNow); wo.stop(rNow + 0.26);
+            } catch(_){}
+          }
+          /* Spawn a spark at ricochet point */
+          if (typeof spawnImpact === 'function') {
+            spawnImpact(envHit.point, normal, 0x55504a);
           }
           resolved = false;             /* keep flying */
         } else if (mat === 'wood' && fracE > 0.20) {
@@ -10617,11 +10717,17 @@ function updatePlayer(dt) {
   const adsTime = (player.activeWeapon && WEAPON_STATS[player.activeWeapon])
     ? (WEAPON_STATS[player.activeWeapon].adsTime || 0.30)
     : 0.30;
-  /* Sprinting locks ADS to 0 — you can't aim while sprinting */
+  /* Sprinting locks ADS to 0 — you can't aim while sprinting.
+   * When sprint just started, snap adsT down instantly (no 1-frame flash).
+   * Use a separate down-rate that's ~3× faster than the up-rate. */
   const adsTarget = (player.isAiming && !sprinting && !player.reloading) ? 1 : 0;
   const adsRate = dt / Math.max(0.05, adsTime);
-  if (player.adsT < adsTarget) player.adsT = Math.min(adsTarget, player.adsT + adsRate);
-  else if (player.adsT > adsTarget) player.adsT = Math.max(adsTarget, player.adsT - adsRate);
+  if (adsTarget > player.adsT) {
+    player.adsT = Math.min(adsTarget, player.adsT + adsRate);
+  } else if (adsTarget < player.adsT) {
+    /* Drop ADS 3× faster than raise — prevents 1-frame reticle flash */
+    player.adsT = Math.max(adsTarget, player.adsT - adsRate * 3);
+  }
   /* Crouch: C (preferred) OR Ctrl (alternate). C avoids the browser-killing
    * Ctrl+W combo that fires when you crouch-walk forward (Ctrl+W closes the
    * tab and browsers do not let JS prevent that).
@@ -10996,10 +11102,12 @@ function updatePlayer(dt) {
    * screen-center pixel. We only show one at a time, and only when the
    * player is actively ADS-ing with a weapon equipped. */
   const showAds = player.isAiming && !!player.activeWeapon;
-  /* Compute target opacities */
-  const ironTgt = (showAds && activeSight === 'iron')     ? 1 : 0;
-  const dotTgt  = (showAds && activeSight === 'red_dot')  ? 1 : 0;
-  const scopeTgt= (showAds && activeSight === 'scope_3x') ? 1 : 0;
+  /* Compute target opacities — scope requires full ADS engagement (adsT > 0.85)
+   * so it doesn't flash on during weapon swap or sprint-exit. */
+  const ironTgt  = (showAds && activeSight === 'iron')     ? 1 : 0;
+  const dotTgt   = (showAds && activeSight === 'red_dot')  ? 1 : 0;
+  const scopeRdy = player.adsT > 0.85; /* scope only when actually shouldered */
+  const scopeTgt = (showAds && activeSight === 'scope_3x' && scopeRdy) ? 1 : 0;
   /* Cache DOM lookups on first call */
   if (!updatePlayer._sightEls) {
     updatePlayer._sightEls = {
@@ -11149,8 +11257,31 @@ function updatePlayer(dt) {
       const wMag = ud ? ud.mag : null;
       const homePos = ud ? ud.magHomePos : null;
       const homeRot = ud ? ud.magHomeRot : null;
+      const isSvd = (player.activeWeapon === 'svd');
 
-      if (t < 0.20) {
+      if (isSvd) {
+        /* SVD bolt-action reload animation:
+         *   0-15%  : tilt gun down + start bolt rotation (left-hand pull)
+         *   15-45% : bolt fully open, eject brass, feed from mag
+         *   45-65% : close bolt (push forward)
+         *   65-100%: return to ready */
+        if (t < 0.15) {
+          const f = t / 0.15;
+          rotX = -0.45 * f; rotZ = -0.20 * f; posY = -0.08 * f;
+        } else if (t < 0.45) {
+          const f = (t - 0.15) / 0.30;
+          rotX = -0.45 + 0.10 * f; rotZ = -0.20 + 0.05 * f; posY = -0.08;
+          /* Animate bolt if available */
+          if (ud && ud.bolt) { ud.bolt.position.z = Math.sin(f * Math.PI) * 0.060; }
+        } else if (t < 0.65) {
+          const f = (t - 0.45) / 0.20;
+          rotX = -0.35 + 0.35 * f; rotZ = -0.15 + 0.15 * f; posY = -0.08 + 0.08 * f;
+          if (ud && ud.bolt) { ud.bolt.position.z = (1 - f) * 0.020; }
+        } else {
+          rotX = 0; rotZ = 0; posY = 0;
+          if (ud && ud.bolt) ud.bolt.position.z = 0;
+        }
+      } else if (t < 0.20) {
         const f = t / 0.20;
         rotX = -0.55 * f;
         rotZ = -0.30 * f;
@@ -11205,7 +11336,7 @@ function updatePlayer(dt) {
           wMag.rotation.copy(homeRot);
         }
         if (ud && ud.bolt) ud.bolt.position.z = 0;
-      }
+      } /* end non-SVD reload branch */
 
       if (t >= 1) finishReload();
     }
@@ -11647,6 +11778,24 @@ function updateBots(dt) {
     const detectRange = 90 * ghillieStealth();
     const losPlayer = (dist < detectRange) && hasLineOfSight(bp, playerPos);
 
+    /* === SMOKE RESPONSE =====================================================
+     * If a smoke cloud is between bot and player: stop firing, move sideways
+     * to flank around it (so smoke always has tactical value). */
+    const smokeBlocking = (typeof smokeBlocksLine === 'function') &&
+      smokeClouds.length > 0 && smokeBlocksLine(bp, playerPos);
+    if (smokeBlocking && !bot._smokeFlanking) {
+      bot._smokeFlanking = true;
+      bot._smokeFlankDir = (Math.random() < 0.5) ? -1 : 1;
+      bot._smokeFlankUntil = now + 1.5 + Math.random();
+    }
+    if (bot._smokeFlanking && now > (bot._smokeFlankUntil || 0)) {
+      bot._smokeFlanking = false;
+    }
+    if (bot._smokeFlanking && !smokeBlocking) {
+      /* Got around the smoke — cancel */
+      bot._smokeFlanking = false;
+    }
+
     /* === R4 TARGET ACQUISITION ===========================================
      * Track CONTINUOUS line-of-sight. A freshly-spotted player triggers a
      * reaction delay before the bot can fire, and the bot's aim only
@@ -11853,6 +12002,14 @@ function updateBots(dt) {
       const k = (Math.sin(now * 18 + bot.jitterPhase) > 0 ? 1 : -1) * 1.5;
       vx += px * k; vz += pz * k;
     }
+    /* Smoke flanking — strafe perpendicular to player direction to get LOS */
+    if (bot._smokeFlanking) {
+      const sd = bot._smokeFlankDir || 1;
+      const perp_x = -dz / Math.max(0.001, dist), perp_z = dx / Math.max(0.001, dist);
+      vx = perp_x * bot.speed * sd;
+      vz = perp_z * bot.speed * sd;
+      bot.crouching = false; /* stand up to see over smoke */
+    }
 
     /* === R4 OBSTACLE AVOIDANCE — steer around blockers ===================
      * When a bot recently detected it is wedged against geometry, it
@@ -11875,19 +12032,36 @@ function updateBots(dt) {
     bp.y = terrainHeight(bp.x, bp.z) - (bot.crouching ? 0.30 : 0);
 
     /* R4 — stuck detection: wanted to move but barely did → we're wedged.
-     * After a short grace, trigger a timed sidestep to route around it. */
+     * Improved: longer persistent stuck → teleport to random free point near
+     * the bot's target to break infinite corner-grind loops. */
     {
       const intended = Math.hypot(vx, vz) * dt;
       const actual = Math.hypot(bp.x - bot._lastX, bp.z - bot._lastZ);
       if (intended > 0.004 && actual < intended * 0.4) {
         bot.stuckTimer += dt * aiInterval;
         if (bot.stuckTimer > 0.25 && now > bot.sidestepUntil) {
+          /* First few stucks: sidestep */
           bot.sidestepDir = (Math.random() < 0.5) ? -1 : 1;
-          bot.sidestepUntil = now + 0.6 + Math.random() * 0.4;
+          bot.sidestepUntil = now + 0.6 + Math.random() * 0.5;
+          bot.stuckTimer = 0;
+          bot._stuckCount = (bot._stuckCount || 0) + 1;
+        }
+        /* Persistent stuck (3+ times): jump to a nearby open position */
+        if ((bot._stuckCount || 0) >= 3) {
+          const ang = Math.random() * Math.PI * 2;
+          const r = 3.0 + Math.random() * 5.0;
+          const tx = bp.x + Math.cos(ang) * r;
+          const tz = bp.z + Math.sin(ang) * r;
+          const cc = collidePoint(tx, tz);
+          if (Math.hypot(cc.x - bp.x, cc.z - bp.z) > 1.5) {
+            bp.x = cc.x; bp.z = cc.z;
+          }
+          bot._stuckCount = 0;
           bot.stuckTimer = 0;
         }
       } else {
         bot.stuckTimer = Math.max(0, bot.stuckTimer - dt * aiInterval);
+        if (actual > intended * 0.6) bot._stuckCount = Math.max(0, (bot._stuckCount || 0) - 1);
       }
       bot._lastX = bp.x; bot._lastZ = bp.z;
     }
@@ -11920,7 +12094,9 @@ function updateBots(dt) {
       bot.burstShotsLeft = 0;
     }
     const suppressed = bot.suppressedUntil && now < bot.suppressedUntil;
+    /* Smoke blocks shooting — bots can't see through smoke, so stop firing */
     const canShoot = losPlayer && reacted && dist < 70 && !bot.reloading && !suppressed &&
+                     !smokeBlocking &&
                      (bot.phase === 'engage' || bot.phase === 'reposition');
     if (canShoot) {
       if (bot.burstShotsLeft <= 0 && now > bot.lastShot + bot.fireRate * 2.5) {
@@ -12330,16 +12506,36 @@ function drawMinimap() {
   let [mx, my] = w2m(sx, sz);
   ctx.fillStyle = '#5fdcff';
   ctx.fillRect(mx - 3, my - 3, 6, 6);
-  /* CTF flag (yellow chevron) */
-  if (typeof ctf !== 'undefined' && ctf && ctf.flag) {
+  /* CTF flag (yellow chevron) — pulse colour based on state */
+  if (typeof ctf !== 'undefined' && ctf && ctf.flag && BOTS_SUBMODE !== 'dm') {
     const fp = ctf.flag.position;
     [mx, my] = w2m(fp.x, fp.z);
-    ctx.fillStyle = '#ffe060';
+    const flagColor = ctf.state === 'carried' ? '#ff6060' : (ctf.state === 'dropped' ? '#ff9030' : '#ffe060');
+    ctx.fillStyle = flagColor;
+    /* Pulsing outer ring when carried */
+    if (ctf.state === 'carried') {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.008);
+      ctx.strokeStyle = 'rgba(255,80,80,' + (0.4 + pulse * 0.4).toFixed(2) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(mx, my, 7 + pulse * 3, 0, Math.PI * 2); ctx.stroke();
+    }
     ctx.beginPath();
-    ctx.moveTo(mx - 4, my + 4);
-    ctx.lineTo(mx + 4, my + 4);
-    ctx.lineTo(mx, my - 5);
+    ctx.moveTo(mx - 4, my + 4); ctx.lineTo(mx + 4, my + 4); ctx.lineTo(mx, my - 5);
     ctx.closePath(); ctx.fill();
+    /* "F" label so player always knows where the flag is */
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 8px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('F', mx, my - 7);
+  }
+  /* Live grenades — white circle blinking with fuse progress */
+  if (typeof grenades !== 'undefined' && grenades.length) {
+    for (const gr of grenades) {
+      const [gx, gy] = w2m(gr.obj.position.x, gr.obj.position.z);
+      if (gx < 0 || gx > W || gy < 0 || gy > H) continue;
+      const blink = Math.floor(performance.now() / 200) % 2 === 0;
+      ctx.fillStyle = gr.kind === 'smoke' ? (blink ? '#80e0ff' : '#5aafcc') :
+                      (blink ? '#ff9a40' : '#cc6020');
+      ctx.beginPath(); ctx.arc(gx, gy, 3, 0, Math.PI * 2); ctx.fill();
+    }
   }
   /* enemies */
   if (typeof bots !== 'undefined') {
@@ -12509,9 +12705,22 @@ function updateHUD() {
 
   /* Objective panel: wave / enemies / flag status */
   const waveEl = document.getElementById('obj-wave');
-  if (waveEl) waveEl.textContent = _wave3Released ? 'РЕЗЕРВ' : 'АТАКА';
+  if (waveEl) {
+    if (BOTS_SUBMODE === 'dm') {
+      /* DM: show kills vs total instead of wave name */
+      const killed = (player.stats && player.stats.kills) || 0;
+      waveEl.textContent = killed + ' УБИТО';
+    } else {
+      waveEl.textContent = _wave3Released ? 'РЕЗЕРВ' : 'АТАКА';
+    }
+  }
   const enemiesEl = document.getElementById('obj-enemies');
-  if (enemiesEl) enemiesEl.textContent = aliveBotCount();
+  if (enemiesEl) {
+    const alive = aliveBotCount();
+    enemiesEl.textContent = alive;
+    /* Colour hint: green when almost won */
+    enemiesEl.style.color = alive <= 5 ? '#60ff60' : (alive <= 15 ? '#ffe060' : '#fff');
+  }
   const flagEl = document.getElementById('obj-flag');
   if (flagEl && BOTS_SUBMODE === 'dm') {
     flagEl.classList.remove('flag-home', 'flag-carried', 'flag-dropped');
@@ -12547,16 +12756,20 @@ function regen(dt) {
 function useMedkit() {
   if (!controls.isLocked) return;
   if (player.medkits <= 0) {
-    showNotice('НЕТ АПТЕЧЕК');
+    showNotice('НЕТ АПТЕЧЕК · Возьми на доске снаряжения (F)');
     return;
   }
-  if (player.health >= player.maxHealth - 0.5) {
-    showNotice('ЗДОРОВЬЕ ПОЛНОЕ');
+  if (player.health >= player.maxHealth - 0.5 && !player.bleeding) {
+    showNotice('ЗДОРОВЬЕ ПОЛНОЕ (' + player.medkits + ' аптечек)');
     return;
   }
   player.medkits -= 1;
+  const healed = player.maxHealth - player.health;
   player.health = player.maxHealth;
-  showNotice('+ АПТЕЧКА');
+  /* Also clears bleeding state */
+  player.bleeding = false;
+  player._bleedT = 0;
+  showNotice('+ АПТЕЧКА · +'  + Math.round(healed) + ' HP · Осталось: ' + player.medkits);
   playMedkit();
 }
 
@@ -13373,7 +13586,31 @@ function updateGrenades(dt) {
     const g = grenades[i];
     /* Physics step */
     g.vel.y -= GRAV * dt;
-    g.obj.position.addScaledVector(g.vel, dt);
+    /* Wall collision (AABB colliders) — bounce off walls before moving */
+    const gp = g.obj.position;
+    const R = 0.045; /* grenade radius */
+    const nx = gp.x + g.vel.x * dt;
+    const nz = gp.z + g.vel.z * dt;
+    let hitWallX = false, hitWallZ = false;
+    for (const col of colliders) {
+      if (nx + R > col.minX && nx - R < col.maxX &&
+          nz + R > col.minZ && nz - R < col.maxZ) {
+        /* Already overlapping in Z but not X → X causes it */
+        const curInZ = gp.z + R > col.minZ && gp.z - R < col.maxZ;
+        const curInX = gp.x + R > col.minX && gp.x - R < col.maxX;
+        if (!curInX && curInZ) { g.vel.x *= -0.55; hitWallX = true; }
+        else if (!curInZ && curInX) { g.vel.z *= -0.55; hitWallZ = true; }
+        else { g.vel.x *= -0.50; g.vel.z *= -0.50; hitWallX = hitWallZ = true; }
+        if (hitWallX || hitWallZ) {
+          g.vel.x *= 0.75; g.vel.z *= 0.75; /* friction */
+          g.spin *= 0.7;
+          break;
+        }
+      }
+    }
+    if (!hitWallX) gp.x += g.vel.x * dt;
+    if (!hitWallZ) gp.z += g.vel.z * dt;
+    gp.y += g.vel.y * dt;
     /* Spin */
     g.obj.rotation.x += g.spin * dt;
     g.obj.rotation.z += g.spin * 0.7 * dt;
@@ -13851,7 +14088,10 @@ function updateBarrelSmoke(dt) {
   if (w && _heatLevel > 0.18) {
     const rate = (_heatLevel - 0.15) * 14;            /* wisps per second */
     if (Math.random() < dt * rate) {
-      const muzzleLocal = new THREE.Vector3((Math.random()-0.5)*0.02, 0.045, -0.85);
+      /* Use the weapon's declared muzzle Z (so smoke appears at the CORRECT
+       * barrel tip for every weapon, not always at the AK position). */
+      const mzZ = (w.userData && typeof w.userData.muzzleZ === 'number') ? w.userData.muzzleZ : -0.85;
+      const muzzleLocal = new THREE.Vector3((Math.random()-0.5)*0.02, 0.014, mzZ);
       const wp = muzzleLocal.clone(); w.localToWorld(wp);
       const tone = 0.55 + Math.random() * 0.18;
       const m = new THREE.SpriteMaterial({
@@ -14322,6 +14562,10 @@ function animate() {
 /* Prime day/night + sky so the very first rendered frame already has the
  * correct lighting/sky (no dark startup flash before the first scheduled tick). */
 if (typeof updateDayNight === 'function') { try { updateDayNight(); updateSkyGradient(); } catch(_){} }
+/* Force a pre-render pass BEFORE the boot overlay fades so the canvas is
+ * already populated with the lit scene — prevents the "black flash" that
+ * was visible for ~1 frame when the boot overlay became transparent. */
+try { composer.render(0.016); } catch(_){}
 /* PERF: build the merged line-of-sight collision mesh now, during load, so the
  * first frame of gameplay doesn't pay a one-time merge/BVH hitch. Only bots
  * mode uses LOS (PvP/team have no bots), so skip the work + memory otherwise. */
@@ -14907,8 +15151,24 @@ if (PVP_MODE) {
       updatePvpScoreDisplay(msg.scores || {});
       pvpAutoEquip();
       if (msg.rematch) {
-        /* Reset health/position for the fresh match. */
+        /* Reset health/position/ammo for the fresh match. */
         player.health = player.maxHealth;
+        player.armor = player.armorMax;
+        player.bleeding = false; player.legSlow = 0;
+        /* Re-spawn at the correct PvP spawn position */
+        const rspawnIdx = msg.spawn !== undefined ? msg.spawn : PVP_SPAWN;
+        const rspawnPos = (PVP_SPAWNS[rspawnIdx] || PVP_SPAWNS[0]).clone();
+        player.position.copy(rspawnPos);
+        player.velocity.set(0, 0, 0);
+        const rspawnYaw = (typeof PVP_SPAWN_YAWS !== 'undefined') ? (PVP_SPAWN_YAWS[rspawnIdx] || 0) : 0;
+        try { camera.rotation.y = rspawnYaw; camera.rotation.x = 0; } catch(_){}
+        /* Refill ammo */
+        if (player.activeWeapon) {
+          const rStats = WEAPON_STATS[player.activeWeapon];
+          player.ammo = rStats.magSize; player.reserve = 120;
+          player.weaponState[player.activeWeapon].ammo = player.ammo;
+          player.weaponState[player.activeWeapon].reserve = 120;
+        }
         try { if (!controls.isLocked) setTimeout(() => { if (!controls.isLocked) controls.lock(); }, 300); } catch (_) {}
       }
       /* Start sending state */
@@ -15513,7 +15773,6 @@ if (PVP_MODE) {
       _teamGameStarted = true;
       _teamDying = false;
       _matchEnded = false;
-      if (msg.reconnect) showNotice('ВЫ ВЕРНУЛИСЬ В МАТЧ');
 
       _teamRoster = (msg.roster || _teamRoster).slice();
       _teamMyTeam = msg.team || _teamMyTeam;
@@ -15522,11 +15781,22 @@ if (PVP_MODE) {
       _teamTotals = msg.team_scores || _teamTotals;
       if (msg.deaths) _teamDeaths = msg.deaths;
       updateTeamScoreDisplay();
-      showNotice('МАТЧ НАЧАЛСЯ — Команда ' +
-        (_teamMyTeam === 'A' ? 'СИНИЕ' : 'КРАСНЫЕ'));
       pvpAutoEquip();
       if (_pvpStateInterval) clearInterval(_pvpStateInterval);
       _pvpStateInterval = setInterval(pvpSendState, 66);
+
+      if (msg.reconnect) {
+        /* Reconnect: restore exact spawn position from server message */
+        const rcPos = getTeamSpawnPos(_teamMyTeam, msg.spawn || 0);
+        player.position.copy(rcPos);
+        player.velocity.set(0, 0, 0);
+        const rcYaw = getTeamSpawnYaw(_teamMyTeam);
+        try { camera.rotation.y = rcYaw; camera.rotation.x = 0; } catch(_){}
+        player.health = Math.min(player.maxHealth, msg.hp || player.maxHealth);
+        showNotice('ВЫ ВЕРНУЛИСЬ В МАТЧ');
+      } else {
+        showNotice('МАТЧ НАЧАЛСЯ — Команда ' + (_teamMyTeam === 'A' ? 'СИНИЕ' : 'КРАСНЫЕ'));
+      }
     }
     else if (msg.type === 'team_room_state') {
       /* Full snapshot — keep scores/team_scores in sync AND reconcile roster
@@ -15769,26 +16039,37 @@ if (PVP_MODE) {
     const titleColor = winner === 'DRAW' ? '#ffcc40' : (myTeamWon ? '#40ff80' : '#ff4040');
     const title = winner === 'DRAW' ? 'НИЧЬЯ' : (myTeamWon ? 'ПОБЕДА' : 'ПОРАЖЕНИЕ');
     const sub = winner === 'DRAW' ? 'Время вышло' : ('Команда ' + (winner === 'A' ? 'СИНИЕ' : 'КРАСНЫЕ') + ' выигрывает');
-    /* Build leaderboard rows — kills desc, then fewest deaths. Compute MVP
-     * (top kills; tie broken by fewest deaths) and mark it with a star. */
-    const sorted = Object.entries(scores)
-      .map(([nick, kills]) => ({ nick, kills, deaths: (_teamDeaths[nick] || 0) }))
+    /* Build leaderboard — separated by team (A blue / B red), sorted kills↓
+     * within each team. MVP = top killer overall (min 1 kill, no MVP on draw). */
+    const toEntry = ([nick, kills]) => ({
+      nick, kills, deaths: (_teamDeaths[nick] || 0),
+      team: (_teamRoster.find(r => r.nick === nick)?.team || '?')
+    });
+    const allEntries = Object.entries(scores).map(toEntry)
       .sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths));
-    const mvp = sorted.length ? sorted[0].nick : null;
-    let rows = '';
-    for (const e of sorted) {
-      const nick = e.nick;
-      const t = _teamRoster.find(r => r.nick === nick)?.team || '?';
-      const tColor = t === 'A' ? '#4a9eff' : '#ff6040';
-      const me = nick === PVP_NICKNAME ? ' style="background:rgba(255,255,255,0.08)"' : '';
-      const kd = e.deaths > 0 ? (e.kills / e.deaths).toFixed(2) : e.kills.toFixed(2);
-      const star = (nick === mvp) ? ' <span style="color:#ffd23a">★ MVP</span>' : '';
-      rows += '<tr' + me + '>' +
-        '<td style="color:' + tColor + ';padding:6px 16px">' + nick + star + '</td>' +
-        '<td style="padding:6px 14px;text-align:right;font-weight:bold">' + e.kills + '</td>' +
-        '<td style="padding:6px 14px;text-align:right;color:#9fb0c4">' + e.deaths + '</td>' +
-        '<td style="padding:6px 14px;text-align:right;color:#cfe0f2">' + kd + '</td></tr>';
+    /* MVP: only awarded in non-draw matches and requires at least 1 kill */
+    const mvp = (winner !== 'DRAW' && allEntries.length && allEntries[0].kills > 0)
+      ? allEntries[0].nick : null;
+    /* Build rows: team A block then team B block, each sorted by kills */
+    function buildTeamRows(team, color) {
+      const entries = allEntries.filter(e => e.team === team);
+      if (!entries.length) return '';
+      let r = '<tr><td colspan="4" style="padding:8px 16px 4px;font-size:11px;letter-spacing:.2em;' +
+        'color:' + color + ';border-top:1px solid rgba(255,255,255,.1)">КОМАНДА ' +
+        (team === 'A' ? 'СИНИЕ' : 'КРАСНЫЕ') + '</td></tr>';
+      for (const e of entries) {
+        const me = e.nick === PVP_NICKNAME ? ' style="background:rgba(255,255,255,0.08)"' : '';
+        const kd = e.deaths > 0 ? (e.kills / e.deaths).toFixed(2) : String(e.kills);
+        const star = (e.nick === mvp) ? ' <span style="color:#ffd23a;font-size:13px">★ MVP</span>' : '';
+        r += '<tr' + me + '>' +
+          '<td style="color:' + color + ';padding:5px 16px">' + e.nick + star + '</td>' +
+          '<td style="padding:5px 14px;text-align:right;font-weight:bold">' + e.kills + '</td>' +
+          '<td style="padding:5px 14px;text-align:right;color:#9fb0c4">' + e.deaths + '</td>' +
+          '<td style="padding:5px 14px;text-align:right;color:#cfe0f2">' + kd + '</td></tr>';
+      }
+      return r;
     }
+    const rows = buildTeamRows('A', '#4a9eff') + buildTeamRows('B', '#ff6040');
     el.innerHTML =
       '<div style="font-size:64px;font-weight:bold;color:' + titleColor + ';text-shadow:0 0 20px ' + titleColor + '">' + title + '</div>' +
       '<div style="font-size:18px;color:#aaa;margin-bottom:24px">' + sub + '</div>' +

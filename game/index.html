@@ -221,7 +221,7 @@ h1 .arena{color:var(--solo);text-shadow:0 0 40px rgba(245,165,36,.45)}
 </head>
 <body>
 
-<div id="build-version">v5.0</div>
+<div id="build-version">v5.1</div>
 
 <div class="shell">
   <div class="masthead">
@@ -671,7 +671,16 @@ document.addEventListener('keydown', (e) => {
     else if (document.getElementById('step-find').classList.contains('active')) doFind();
     else if (document.getElementById('tstep-nick').classList.contains('active')) doTeamJoin();
   }
-  if (e.key === 'Escape') { closeBots(); }
+  if (e.key === 'Escape') {
+    /* Close whichever overlay is open */
+    if (document.getElementById('botsCfg').classList.contains('active')) {
+      closeBots();
+    } else if (document.getElementById('lobby').classList.contains('active')) {
+      closeLobby();
+    } else if (document.getElementById('teamLobby').classList.contains('active')) {
+      closeTeamLobby();
+    }
+  }
 });
 </script>
 </body>
