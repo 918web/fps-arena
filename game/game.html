@@ -63,9 +63,9 @@
     background: radial-gradient(ellipse at center, rgba(0,0,0,0) 48%, rgba(0,0,0,0.12) 80%, rgba(0,0,0,0.28) 100%);
   }
   #grain {
-    position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0.05;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.4' numOctaves='2'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.6'/></svg>");
-    mix-blend-mode: overlay;
+    position: fixed; inset: 0; pointer-events: none; z-index: 4; opacity: 0;
+    /* Grain handled entirely by the GPU bodycam shader — CSS layer disabled
+     * to prevent double-grain shimmer effect */
   }
   #lowHpVeil {
     position: fixed; inset: 0; pointer-events: none; z-index: 6; opacity: 0;
@@ -82,7 +82,20 @@
   }
   #suppressLines {
     position: fixed; inset: 0; pointer-events: none; z-index: 7; opacity: 0;
-    background-image: repeating-linear-gradient(0deg, rgba(255,255,255,0.05) 0px, rgba(255,255,255,0.05) 1px, transparent 1px, transparent 4px);
+    /* Slightly more visible suppression indicator — horizontal compression
+     * lines that suggest visual distortion under sustained fire */
+    background-image:
+      repeating-linear-gradient(0deg,
+        rgba(255,255,255,0.06) 0px,
+        rgba(255,255,255,0.04) 1px,
+        transparent 1px,
+        transparent 5px),
+      repeating-linear-gradient(90deg,
+        rgba(200,220,255,0.02) 0px,
+        transparent 2px,
+        transparent 12px);
+    /* Slight blur simulates pressure on the eyes */
+    backdrop-filter: blur(0.3px);
   }
   /* Damage direction indicators (8 pre-positioned arrows around the screen) */
   .dmgArrow {
@@ -97,18 +110,23 @@
   /* Hit confirmation marker (X-shape that flashes when you hit a bot) */
   #hitMarker {
     position: fixed; left: 50%; top: 50%; pointer-events: none; z-index: 9;
-    width: 26px; height: 26px;
+    width: 30px; height: 30px;
     transform: translate(-50%, -50%);
     opacity: 0;
+    transition: opacity 0.05s ease-out;
   }
   #hitMarker::before, #hitMarker::after {
     content: ''; position: absolute; left: 50%; top: 50%;
-    width: 16px; height: 2px; background: #fff; box-shadow: 0 0 5px #fff;
+    width: 18px; height: 2.5px; background: #ff5050;
+    box-shadow: 0 0 6px #ff2020, 0 0 12px rgba(255,80,80,0.5);
     transform-origin: center;
   }
   #hitMarker::before { transform: translate(-50%,-50%) rotate(45deg); }
   #hitMarker::after  { transform: translate(-50%,-50%) rotate(-45deg); }
-  #hitMarker.hs::before, #hitMarker.hs::after { background: #ffe060; box-shadow: 0 0 8px #ffe060; }
+  #hitMarker.hs::before, #hitMarker.hs::after {
+    background: #ffe060; box-shadow: 0 0 8px #ffcc00, 0 0 16px rgba(255,220,0,0.6);
+    width: 20px; height: 3px;
+  }
 
   /* Crosshair */
   #crosshair { display: none !important; } /* hidden — use iron sights */
@@ -963,15 +981,15 @@ const BodycamShader = {
   uniforms: {
     tDiffuse:    { value: null },
     uTime:       { value: 0 },
-    uAberration: { value: 0.0012 },
-    uGrain:      { value: 0.045 },
-    uVignette:   { value: 0.30 },
+    uAberration: { value: 0.0004 },
+    uGrain:      { value: 0.016 },
+    uVignette:   { value: 0.28 },
     uDamage:     { value: 0.0 },
     /* color-grade constants (were the ColorGradeShader uniforms) */
-    uSaturation: { value: 0.68 },
-    uContrast:   { value: 1.14 },
-    uGreenTrim:  { value: 0.985 },
-    uTintAmt:    { value: 0.20 },
+    uSaturation: { value: 0.72 },
+    uContrast:   { value: 1.10 },
+    uGreenTrim:  { value: 0.990 },
+    uTintAmt:    { value: 0.16 },
     uShadowTint: { value: new THREE.Color(0x2a2c2b) },
     uHighTint:   { value: new THREE.Color(0x6a5f48) }
   },
@@ -985,13 +1003,28 @@ const BodycamShader = {
     uniform float uSaturation, uContrast, uGreenTrim, uTintAmt;
     uniform vec3 uShadowTint, uHighTint;
     varying vec2 vUv;
+    /* Low-frequency film grain — samples at ~14 fps so grain reads as
+     * cinematic texture, not high-freq TV-static shimmer. Uses two-octave
+     * smooth noise to avoid the "every-pixel-independent" strobing. */
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+    float filmGrain(vec2 uv, float t){
+      /* Snap time to 14 fps to eliminate temporal shimmer */
+      float tSnap = floor(t * 14.0) / 14.0;
+      vec2 cell = floor(uv * vec2(320.0, 180.0));
+      float n = hash(cell + vec2(tSnap * 17.3, tSnap * 91.7));
+      /* Smooth within each cell so adjacent pixels blend */
+      vec2 f = fract(uv * vec2(320.0, 180.0));
+      vec2 f2 = f * f * (3.0 - 2.0 * f);
+      vec2 cell2 = floor(uv * vec2(320.0, 180.0) + 1.0);
+      float n2 = hash(cell2 + vec2(tSnap * 17.3, tSnap * 91.7));
+      return mix(n, n2, f2.x) - 0.5;
+    }
     void main(){
       vec2 uv = vUv;
       vec2 dir = uv - 0.5;
       float r2 = dot(dir, dir);
-      /* Chromatic aberration (RGB split) — grows toward edges + on damage */
-      float ca = uAberration * (1.0 + r2 * 3.0) + uDamage * 0.004;
+      /* Chromatic aberration — minimal base, spikes only on heavy damage */
+      float ca = uAberration * (1.0 + r2 * 2.0) + uDamage * 0.003;
       vec2 off = dir * ca;
       vec3 col = vec3(
         texture2D(tDiffuse, uv + off).r,
@@ -1006,11 +1039,12 @@ const BodycamShader = {
       vec3 tint = mix(uShadowTint, uHighTint, smoothstep(0.0, 1.0, l));
       col = mix(col, col + (tint - 0.5), uTintAmt);
       /* --- bodycam vignette + grain + damage wash --- */
-      float vig = smoothstep(0.95, 0.25, r2 * 2.2);
+      float vig = smoothstep(0.95, 0.28, r2 * 2.0);
       col *= mix(1.0, vig, uVignette);
-      float g = hash(uv * vec2(1920.0, 1080.0) + fract(uTime) * 97.3) - 0.5;
+      /* Film grain: low-frequency, 14fps snap — no more flickering shimmer */
+      float g = filmGrain(uv, uTime);
       col += g * uGrain;
-      col = mix(col, vec3(0.55, 0.02, 0.02), clamp(uDamage, 0.0, 1.0) * r2 * 2.0);
+      col = mix(col, vec3(0.55, 0.02, 0.02), clamp(uDamage, 0.0, 1.0) * r2 * 1.8);
       gl_FragColor = vec4(max(col, 0.0), 1.0);
     }
   `
@@ -1668,7 +1702,9 @@ function addCrate(x, z, size = 1.2) {
    * orange the raw woodTex shows at full saturation. */
   const mat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x6a5236, roughness: 0.95 });
   const m = new THREE.Mesh(geo, mat);
-  m.position.set(x, terrainHeight(x, z) + size / 2, z);
+  /* Sink 8% into ground so flat-bottomed crates don't appear to hover on
+   * sloped terrain — the gap is covered by the box geometry itself. */
+  m.position.set(x, terrainHeight(x, z) + size / 2 - size * 0.08, z);
   m.rotation.y = Math.random() * Math.PI;
   m.castShadow = true; m.receiveShadow = true;
   scene.add(m);
@@ -1681,7 +1717,8 @@ function addBarrel(x, z) {
   const g = new THREE.CylinderGeometry(0.45, 0.45, 1.1, 16);
   const m = new THREE.MeshStandardMaterial({ color: 0x4a3022, roughness: 0.7, metalness: 0.6 });
   const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(x, terrainHeight(x, z) + 0.55, z);
+  /* Sink barrel bottom 6cm to avoid floating look on sloped terrain */
+  mesh.position.set(x, terrainHeight(x, z) + 0.55 - 0.06, z);
   mesh.castShadow = true; mesh.receiveShadow = true;
   scene.add(mesh);
   obstacles.push(mesh);
@@ -1727,7 +1764,8 @@ function addSandbagWall(cx, cz, dir = 0, count = 4) {
       const g = new THREE.BoxGeometry(0.8, 0.32, 0.5);
       const m = new THREE.MeshStandardMaterial({ color: 0x9a8460, roughness: 1 });
       const mesh = new THREE.Mesh(g, m);
-      mesh.position.set(x, terrainHeight(x, z) + 0.16 + layer * 0.32, z);
+      /* Sink bottom row 4cm into terrain so bags look grounded, not floating */
+      mesh.position.set(x, terrainHeight(x, z) + 0.16 + layer * 0.32 - 0.04, z);
       mesh.rotation.y = dir + (Math.random()-0.5)*0.1;
       mesh.castShadow = true; mesh.receiveShadow = true;
       scene.add(mesh);
@@ -1736,7 +1774,7 @@ function addSandbagWall(cx, cz, dir = 0, count = 4) {
     /* Two-layer sandbag wall = 0.64m total height → JUMPABLE.
      * Set maxY so player can step on top instead of getting blocked. */
     colliders.push({ minX: x-0.45, maxX: x+0.45, minZ: z-0.3, maxZ: z+0.3,
-                     maxY: terrainHeight(x, z) + 0.64 });
+                     maxY: terrainHeight(x, z) + 0.60 });
   }
 }
 
@@ -2045,16 +2083,20 @@ function addWreckedTruck(cx, cz, dir = 0) {
 
 /* Cluster of crates */
 function addCrateStack(cx, cz) {
+  /* Use the terrain height at the cluster CENTER for ALL crates so the
+   * whole stack sits on a consistent base. Individual per-crate terrain
+   * lookups caused crates to float/sink on sloped ground. */
+  const baseY = terrainHeight(cx, cz);
   const positions = [
-    {x:-0.7, y:0.6, z: 0.0, s:1.2},
-    {x: 0.5, y:0.5, z: 0.3, s:1.0},
-    {x:-0.3, y:1.55,z:-0.2, s:0.9},
-    {x: 0.2, y:0.4, z:-0.7, s:0.8}
+    {x:-0.7, y:0.58, z: 0.0, s:1.2},
+    {x: 0.5, y:0.48, z: 0.3, s:1.0},
+    {x:-0.3, y:1.52,z:-0.2, s:0.9},
+    {x: 0.2, y:0.38, z:-0.7, s:0.8}
   ];
   const mat = new THREE.MeshStandardMaterial({ map: woodTex, color: 0x6a5236, roughness: 0.95 });
   positions.forEach(p => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(p.s, p.s, p.s), mat);
-    mesh.position.set(cx + p.x, terrainHeight(cx + p.x, cz + p.z) + p.y, cz + p.z);
+    mesh.position.set(cx + p.x, baseY + p.y, cz + p.z);
     mesh.rotation.y = Math.random() * Math.PI;
     mesh.castShadow = true; mesh.receiveShadow = true;
     scene.add(mesh); obstacles.push(mesh);
@@ -6105,29 +6147,37 @@ function _makeFinger(mat, jointMat, len1, len2, w) {
   return knuckle;
 }
 
-/* Hands — solid tactical sleeves + articulated gloves. Materials chosen so the
- * hands read clearly up close (the old busy camo texture + near-black gloves
- * looked like a green blob and vanished in shadow). */
+/* Hands — solid tactical sleeves + articulated gloves.
+ * Sleeves are long enough to fill the screen bottom so no "floating gloves"
+ * effect. The forearm cylinder extends well off the bottom edge at all
+ * weapon positions, giving a convincing first-person body presence. */
 function createHands() {
   const g = new THREE.Group();
-  const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x4a5138, roughness: 0.92, metalness: 0.0 }); /* solid olive-drab fatigue */
-  const gloveMat  = new THREE.MeshStandardMaterial({ color: 0x3b352c, roughness: 0.68, metalness: 0.06 }); /* tan tactical glove */
-  const knuckMat  = new THREE.MeshStandardMaterial({ color: 0x24201a, roughness: 0.55, metalness: 0.10 }); /* dark knuckle pads */
+  const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x4a5138, roughness: 0.90, metalness: 0.0 }); /* solid olive-drab fatigue */
+  const forearmMat= new THREE.MeshStandardMaterial({ color: 0x42482f, roughness: 0.92, metalness: 0.0 }); /* slightly darker forearm */
+  const gloveMat  = new THREE.MeshStandardMaterial({ color: 0x3b352c, roughness: 0.65, metalness: 0.06 }); /* tan tactical glove */
+  const knuckMat  = new THREE.MeshStandardMaterial({ color: 0x24201a, roughness: 0.52, metalness: 0.10 }); /* dark knuckle pads */
   const cuffMat   = new THREE.MeshStandardMaterial({ color: 0x30352a, roughness: 0.85 });
 
   /* ---------- RIGHT (trigger) hand ---------- */
   const rArm = new THREE.Group();
-  const rSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.14, 12), sleeveMat);
-  rSleeve.rotation.x = 1.0; rSleeve.position.set(0, -0.035, 0.15); rArm.add(rSleeve);
-  const rCuff = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.05, 0.035, 12), cuffMat);
-  rCuff.rotation.x = 1.0; rCuff.position.set(0, -0.05, 0.115); rArm.add(rCuff);
+  /* Main sleeve — extended to fill the screen bottom; tapers from wrist upward.
+   * Positioned so the wrist end aligns near the grip, sleeve exits screen below. */
+  const rSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.050, 0.068, 0.62, 14), sleeveMat);
+  rSleeve.rotation.x = 0.95; rSleeve.position.set(0.002, -0.27, 0.42); rArm.add(rSleeve);
+  /* Forearm muscle detail — oval cross-section inset into the sleeve */
+  const rForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.044, 0.058, 0.55, 14), forearmMat);
+  rForearm.rotation.x = 0.95; rForearm.position.set(0.002, -0.26, 0.40); rArm.add(rForearm);
+  /* Wrist cuff — visible transition between sleeve and glove */
+  const rCuff = new THREE.Mesh(new THREE.CylinderGeometry(0.054, 0.052, 0.038, 14), cuffMat);
+  rCuff.rotation.x = 0.95; rCuff.position.set(0.002, -0.050, 0.115); rArm.add(rCuff);
 
   const rHand = new THREE.Group();
   rHand.position.set(0, -0.07, 0.075);
   rHand.rotation.x = 0.3;
-  const rPalm = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.085, 0.05), gloveMat);
+  const rPalm = new THREE.Mesh(new THREE.BoxGeometry(0.054, 0.088, 0.052), gloveMat);
   rHand.add(rPalm);
-  const rBack = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.02, 0.044), knuckMat);
+  const rBack = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.022, 0.046), knuckMat);
   rBack.position.set(0, 0.014, -0.026); rHand.add(rBack);
   /* three curled fingers (middle / ring / pinky) wrap the FRONT of the grip */
   const rFingers = [];
@@ -6136,7 +6186,7 @@ function createHands() {
     const fx = -0.004 + i * 0.014;
     const f = _makeFinger(gloveMat, knuckMat, rLens[i][0], rLens[i][1], 0.012);
     f.position.set(fx, -0.030, -0.026);
-    f.rotation.x = 0.92;                  /* relaxed curl around the grip front */
+    f.rotation.x = 0.92;
     f.userData.joint.rotation.x = 0.82;
     rHand.add(f); rFingers.push(f);
   }
@@ -6157,20 +6207,21 @@ function createHands() {
 
   /* ---------- LEFT (support) hand ---------- */
   const lArm = new THREE.Group();
-  /* Short forearm stub: a long sleeve cylinder used to fill the screen and
-   * read as a green "blob"; keep it short so the GLOVE is the prominent, and
-   * tuck it just behind the hand. */
-  const lSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.048, 0.052, 0.15, 12), sleeveMat);
-  lSleeve.rotation.x = 1.45; lSleeve.rotation.z = -0.15; lSleeve.position.set(-0.02, -0.055, -0.10); lArm.add(lSleeve);
-  const lCuff = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.035, 12), cuffMat);
-  lCuff.rotation.x = 1.45; lCuff.rotation.z = -0.15; lCuff.position.set(-0.012, -0.05, -0.135); lArm.add(lCuff);
+  /* Extended sleeve exits the screen at the bottom-left — gives the player
+   * a sense of body/forearm presence under the foregrip/handguard. */
+  const lSleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.070, 0.58, 14), sleeveMat);
+  lSleeve.rotation.x = 1.40; lSleeve.rotation.z = -0.12; lSleeve.position.set(-0.022, -0.22, -0.26); lArm.add(lSleeve);
+  const lForearm = new THREE.Mesh(new THREE.CylinderGeometry(0.046, 0.062, 0.50, 14), forearmMat);
+  lForearm.rotation.x = 1.40; lForearm.rotation.z = -0.12; lForearm.position.set(-0.020, -0.21, -0.25); lArm.add(lForearm);
+  const lCuff = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.053, 0.038, 14), cuffMat);
+  lCuff.rotation.x = 1.40; lCuff.rotation.z = -0.12; lCuff.position.set(-0.013, -0.05, -0.138); lArm.add(lCuff);
 
   const lHand = new THREE.Group();
   lHand.position.set(-0.005, -0.04, -0.18);
   lHand.rotation.x = 0.05;
-  const lPalm = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 0.085), gloveMat);
+  const lPalm = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.048, 0.088), gloveMat);
   lHand.add(lPalm);
-  const lBack = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.016, 0.07), knuckMat);
+  const lBack = new THREE.Mesh(new THREE.BoxGeometry(0.048, 0.018, 0.073), knuckMat);
   lBack.position.set(0, 0.026, 0); lHand.add(lBack);
   /* four fingers drape over the FAR side of the handguard (curl in -X) */
   const lFingers = [];
@@ -6178,7 +6229,7 @@ function createHands() {
     const fz = -0.03 + i * 0.02;
     const f = _makeFinger(gloveMat, knuckMat, 0.032, 0.028, 0.011);
     f.position.set(-0.026, -0.018, fz);
-    f.rotation.z = -0.92;                 /* wrap down the far side */
+    f.rotation.z = -0.92;
     f.userData.joint.rotation.z = -0.80;
     lHand.add(f); lFingers.push(f);
   }
@@ -6643,19 +6694,35 @@ function requestWeaponSwap(name) {
 
 /* Muzzle flash — the sprite is parented to the ACTIVE weapon. We move it
  * between weapons when the player swaps. */
+/* === MUZZLE FLASH SYSTEM =================================================
+ * Three-layer flash: core bright sprite + mid ambient halo + point light.
+ * Core: tight additive bright star — visible through smoke, convincing at
+ *       close range.
+ * Halo: wider softer glow that bleeds into the surrounding area.
+ * Light: large warm PointLight that momentarily lights up nearby surfaces.
+ * ========================================================================= */
 const flashMat = new THREE.SpriteMaterial({
-  color: 0xffd06a, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
+  color: 0xfff4c0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
 });
 const flash = new THREE.Sprite(flashMat);
-flash.scale.set(0.45, 0.45, 0.45);
-ak.add(flash);   /* default parent (AK) — moves to m416 on swap */
+flash.scale.set(0.58, 0.58, 0.58);
+ak.add(flash);
 flash.position.set(0, 0.018, -0.84);
-const flashLight = new THREE.PointLight(0xffb060, 0, 8, 2);
+/* Halo sprite — wider, softer orange glow around the core */
+const _flashHaloMat = new THREE.SpriteMaterial({
+  color: 0xff8820, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
+});
+const _flashHalo = new THREE.Sprite(_flashHaloMat);
+_flashHalo.scale.set(1.10, 1.10, 1.10);
+flash.add(_flashHalo);
+_flashHalo.position.set(0, 0, 0);
+/* Dynamic point light — illuminates nearby surfaces on each shot */
+const flashLight = new THREE.PointLight(0xffb060, 0, 14, 1.8);
+flashLight.castShadow = false;
 flash.add(flashLight);
 function setMuzzleFlashAnchor(weaponName) {
   const target = (weaponName && WEAPON_OBJS[weaponName]) || ak;
   if (flash.parent !== target) target.add(flash);
-  /* Each model declares its own muzzle Z; fall back to the AK value. */
   const _supTip = player.suppressorOn && target.userData && typeof target.userData.muzzleZSup === 'number';
   const mz = _supTip
     ? target.userData.muzzleZSup
@@ -6895,21 +6962,46 @@ function _updateNvgVisual() {
   }
 }
 
-/* Smoke puff after each shot — spawned in WORLD space at the muzzle (so it
- * doesn't leave a permanent grey square attached to the gun in the camera). */
+/* Smoke puff after each shot — spawned in WORLD space at the muzzle so it
+ * drifts independently of gun movement. Two layers:
+ *  1. hot gas — bright yellowish, fast, brief
+ *  2. cordite smoke — grey, slower, lingers longer */
 const smokes = [];
 function spawnMuzzleSmoke() {
-  if (player.suppressorOn) return;
-  const m = new THREE.SpriteMaterial({ color: 0xc0c0c0, transparent: true, opacity: 0.4, depthWrite: false });
-  const s = new THREE.Sprite(m);
-  flash.getWorldPosition(s.position);
-  s.scale.setScalar(0.18 + Math.random() * 0.08);
-  scene.add(s);
+  if (player.suppressorOn) {
+    /* Suppressed: tiny wisp only */
+    const m = new THREE.SpriteMaterial({ color: 0xb0b0b0, transparent: true, opacity: 0.18, depthWrite: false });
+    const s = new THREE.Sprite(m);
+    flash.getWorldPosition(s.position);
+    s.scale.setScalar(0.09);
+    scene.add(s);
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    smokes.push({ obj: s, vel: dir.clone().multiplyScalar(0.8).add(new THREE.Vector3(0, 0.25, 0)), life: 0.35 });
+    return;
+  }
   const dir = new THREE.Vector3();
   camera.getWorldDirection(dir);
-  const drift = dir.clone().multiplyScalar(1.5);
-  drift.y += 0.4 + Math.random() * 0.5;
-  smokes.push({ obj: s, vel: drift, life: 0.6 });
+  /* Hot gas flash — small, warm, very brief */
+  const hm = new THREE.SpriteMaterial({ color: 0xffd090, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending });
+  const hs = new THREE.Sprite(hm);
+  flash.getWorldPosition(hs.position);
+  hs.scale.setScalar(0.12 + Math.random() * 0.06);
+  scene.add(hs);
+  smokes.push({ obj: hs, vel: dir.clone().multiplyScalar(2.0).add(new THREE.Vector3((Math.random()-0.5)*0.4, 0.3, (Math.random()-0.5)*0.4)), life: 0.20 });
+  /* Cordite smoke — grey, drifts up and forward */
+  for (let i = 0; i < 2; i++) {
+    const sm = new THREE.SpriteMaterial({ color: 0xa8a8a8 + (Math.random() > 0.5 ? 0x080808 : 0), transparent: true, opacity: 0.38 + Math.random() * 0.12, depthWrite: false });
+    const ss = new THREE.Sprite(sm);
+    flash.getWorldPosition(ss.position);
+    ss.position.addScaledVector(dir, 0.12 * (i + 1));
+    ss.scale.setScalar(0.14 + Math.random() * 0.10);
+    scene.add(ss);
+    const drift = dir.clone().multiplyScalar(1.2 + Math.random() * 0.8);
+    drift.y += 0.5 + Math.random() * 0.6;
+    drift.x += (Math.random() - 0.5) * 0.6;
+    drift.z += (Math.random() - 0.5) * 0.6;
+    smokes.push({ obj: ss, vel: drift, life: 0.7 + Math.random() * 0.3 });
+  }
 }
 
 /* ========================================================================
@@ -9283,7 +9375,7 @@ function getLosMesh() {
   }
   return _losMesh;
 }
-const tracerMat = new THREE.LineBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.9 });
+const tracerMat = new THREE.LineBasicMaterial({ color: 0xfff4c0, transparent: true, opacity: 0.95 });
 
 /* === BULLETS — physics-based projectiles (B1, B2, B4) ===================
  * Each shot pushes a bullet object that travels at muzzleVelocity, is
@@ -9338,9 +9430,9 @@ function spawnTracer(from, to) {
   arr.setXYZ(0, from.x, from.y, from.z);
   arr.setXYZ(1, to.x, to.y, to.z);
   arr.needsUpdate = true;
-  slot.line.material.opacity = 0.9;
+  slot.line.material.opacity = 0.95;
   slot.line.visible = true;
-  slot.life = 0.06;
+  slot.life = 0.10;  /* slightly longer tracer life for better visibility */
 }
 
 const impacts = [];
@@ -9352,68 +9444,115 @@ function _enforceImpactCap() {
 }
 
 function spawnImpact(point, normal, color = 0x808080) {
-  /* small puff sprite — initial dust burst */
-  const m = new THREE.SpriteMaterial({ color, transparent: true, opacity: 0.85, depthWrite: false });
+  /* === CORE DUST BURST =====================================================
+   * Initial bright flash that immediately fades — tells the player the shot
+   * landed before the slower smoke settles. Scale varies by material type. */
+  const isDirt   = (color === 0x808080 || color === 0x6a4a26 || color === 0x5a4230);
+  const isMetal  = (color === 0x55504a || color === 0x4a443c || color === 0x666660);
+  const isConcrete = (color === 0x9c9890 || color === 0x807a72);
+  const baseScale = isDirt ? 0.38 : isMetal ? 0.28 : 0.33;
+  const m = new THREE.SpriteMaterial({ color: isDirt ? 0xb09060 : (isMetal ? 0xaaaaaa : color),
+                                       transparent: true, opacity: 0.90, depthWrite: false });
   const s = new THREE.Sprite(m);
   s.position.copy(point);
-  s.scale.set(0.32, 0.32, 0.32);
+  s.scale.set(baseScale, baseScale, baseScale);
   scene.add(s);
-  impacts.push({ obj: s, life: 0.4, _baseScale: 0.32, _grow: 1.4, _fadeFrom: 0.4 });
+  impacts.push({ obj: s, life: 0.35, _baseScale: baseScale, _grow: 1.6, _fadeFrom: 0.35 });
 
-  /* === SMOKE TRAIL — 2 small grey puffs that drift up and grow ============
-   * Cheap (sprites only), pooled (counted in MAX_IMPACTS), and visually
-   * tells the player "shot landed here" much better than a single pixel. */
-  for (let i = 0; i < 2; i++) {
+  /* === SMOKE PUFFS — 3 particles that drift and grow ====================== */
+  const puffCount = isDirt ? 3 : 2;
+  const puffColor = isDirt ? 0x8a7a60 : (isMetal ? 0x909090 : 0xa0a0a0);
+  for (let i = 0; i < puffCount; i++) {
     const sm = new THREE.SpriteMaterial({
-      color: 0xa0a0a0, transparent: true, opacity: 0.55,
+      color: puffColor, transparent: true, opacity: 0.50 + Math.random() * 0.15,
       depthWrite: false, blending: THREE.NormalBlending
     });
     const sp = new THREE.Sprite(sm);
-    sp.position.copy(point).addScaledVector(normal, 0.05);
-    sp.position.x += (Math.random() - 0.5) * 0.20;
-    sp.position.y += (Math.random()) * 0.10;
-    sp.position.z += (Math.random() - 0.5) * 0.20;
-    sp.scale.setScalar(0.25 + Math.random() * 0.10);
+    sp.position.copy(point).addScaledVector(normal, 0.04 + i * 0.03);
+    sp.position.x += (Math.random() - 0.5) * 0.22;
+    sp.position.y += Math.random() * 0.12;
+    sp.position.z += (Math.random() - 0.5) * 0.22;
+    sp.scale.setScalar(0.22 + Math.random() * 0.14);
     scene.add(sp);
-    /* Drift upward, slowly grow & fade. */
     impacts.push({
-      obj: sp, life: 0.9 + Math.random() * 0.4,
-      vel: new THREE.Vector3((Math.random()-0.5)*0.4, 0.7 + Math.random()*0.5, (Math.random()-0.5)*0.4),
-      _baseScale: sp.scale.x, _grow: 3.0,
+      obj: sp, life: 0.85 + Math.random() * 0.55,
+      vel: new THREE.Vector3((Math.random()-0.5)*0.5, 0.8 + Math.random()*0.7, (Math.random()-0.5)*0.5),
+      _baseScale: sp.scale.x, _grow: 3.2,
       _fadeFrom: 1.0
     });
   }
 
-  /* === SPARK FLECKS — a few orange specks for metallic surfaces ==========
-   * Skipped on dark/dirt color to keep dirt impacts looking like dirt. */
-  if (color !== 0x6a4a26 && color !== 0x808080) {
-    for (let i = 0; i < 3; i++) {
+  /* === DIRT CLODS for ground impacts =====================================
+   * Small dark chunks that arc out from the impact point. */
+  if (isDirt) {
+    for (let i = 0; i < 4; i++) {
+      const dm = new THREE.SpriteMaterial({
+        color: 0x5a4020, transparent: true, opacity: 0.92, depthWrite: false
+      });
+      const d = new THREE.Sprite(dm);
+      d.position.copy(point);
+      d.scale.setScalar(0.06 + Math.random() * 0.06);
+      scene.add(d);
+      const va = Math.random() * Math.PI * 2;
+      const vsp = 1.5 + Math.random() * 2.5;
+      impacts.push({
+        obj: d, life: 0.45, gravity: true,
+        vel: new THREE.Vector3(
+          Math.cos(va) * vsp + normal.x * 1.5,
+          2.2 + Math.random() * 1.8 + normal.y * 1.5,
+          Math.sin(va) * vsp + normal.z * 1.5
+        ),
+        _baseScale: d.scale.x, _grow: 1.0, _fadeFrom: 0.45
+      });
+    }
+  }
+
+  /* === METAL SPARKS — 5-8 hot bright flecks for metallic / hard surfaces == */
+  if (isMetal || isConcrete || (!isDirt && color !== 0x808080)) {
+    const sparkCount = isMetal ? 7 : 4;
+    for (let i = 0; i < sparkCount; i++) {
+      const sparkColor = isMetal
+        ? (Math.random() > 0.5 ? 0xffee80 : 0xff9040)
+        : 0xddccaa;
       const km = new THREE.SpriteMaterial({
-        color: 0xffc060, transparent: true, opacity: 0.95,
+        color: sparkColor, transparent: true, opacity: 1.0,
         blending: THREE.AdditiveBlending, depthWrite: false
       });
       const k = new THREE.Sprite(km);
       k.position.copy(point);
-      k.scale.setScalar(0.04 + Math.random() * 0.04);
+      k.scale.setScalar(0.028 + Math.random() * 0.040);
       scene.add(k);
       const v = new THREE.Vector3(
-        (Math.random()-0.5)*4 + normal.x*2,
-        (Math.random())*3 + normal.y*2,
-        (Math.random()-0.5)*4 + normal.z*2
+        (Math.random()-0.5)*5 + normal.x*3,
+        1.5 + Math.random()*3.5 + normal.y*2,
+        (Math.random()-0.5)*5 + normal.z*3
       );
-      impacts.push({ obj: k, life: 0.30, vel: v, gravity: true,
-                      _baseScale: k.scale.x, _grow: 1.0, _fadeFrom: 0.30 });
+      impacts.push({ obj: k, life: 0.22 + Math.random()*0.12, vel: v, gravity: true,
+                      _baseScale: k.scale.x, _grow: 0.8, _fadeFrom: 0.22 });
     }
+    /* Bright micro-flash at impact point */
+    const flashM = new THREE.SpriteMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.6,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+    const flashS = new THREE.Sprite(flashM);
+    flashS.position.copy(point);
+    flashS.scale.setScalar(0.10);
+    scene.add(flashS);
+    impacts.push({ obj: flashS, life: 0.06, _baseScale: 0.10, _grow: 2.0, _fadeFrom: 0.06 });
   }
 
-  /* Decal: small dark disc oriented to surface */
-  const decalGeo = new THREE.CircleGeometry(0.05, 8);
-  const decalMat = new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.7, depthTest: true, depthWrite: false });
+  /* === BULLET HOLE DECAL (larger, more visible) ========================== */
+  const decalGeo = new THREE.CircleGeometry(isDirt ? 0.07 : 0.055, 10);
+  const decalMat = new THREE.MeshBasicMaterial({
+    color: isDirt ? 0x1a1208 : 0x0a0a0a,
+    transparent: true, opacity: 0.80, depthTest: true, depthWrite: false
+  });
   const decal = new THREE.Mesh(decalGeo, decalMat);
-  decal.position.copy(point).addScaledVector(normal, 0.01);
+  decal.position.copy(point).addScaledVector(normal, 0.012);
   decal.lookAt(point.clone().add(normal));
   scene.add(decal);
-  impacts.push({ obj: decal, life: 6.0, decay: 0.05, _baseScale: 1, _grow: 1, _fadeFrom: 1.0 });
+  impacts.push({ obj: decal, life: 8.0, decay: 0.04, _baseScale: 1, _grow: 1, _fadeFrom: 1.0 });
   _enforceImpactCap();
 }
 
@@ -9478,15 +9617,73 @@ function spawnFireBurst(point, scale = 1.0) {
 }
 
 function spawnBlood(point) {
-  for (let i = 0; i < 6; i++) {
-    const m = new THREE.SpriteMaterial({ color: 0xaa1010, transparent: true, opacity: 0.85, depthWrite: false });
+  /* Primary blood mist — larger spherical spray */
+  const mistMat = new THREE.SpriteMaterial({
+    color: 0x880000, transparent: true, opacity: 0.75, depthWrite: false
+  });
+  const mist = new THREE.Sprite(mistMat);
+  mist.position.copy(point);
+  mist.scale.setScalar(0.38);
+  scene.add(mist);
+  impacts.push({ obj: mist, life: 0.55, _baseScale: 0.38, _grow: 2.2, _fadeFrom: 0.55 });
+
+  /* Individual blood droplets that arc outward */
+  for (let i = 0; i < 8; i++) {
+    const col = (Math.random() > 0.4) ? 0xaa0808 : 0x660404;
+    const m = new THREE.SpriteMaterial({ color: col, transparent: true, opacity: 0.90, depthWrite: false });
     const s = new THREE.Sprite(m);
     s.position.copy(point);
-    s.scale.set(0.18 + Math.random()*0.1, 0.18 + Math.random()*0.1, 0.18);
+    const sc = 0.10 + Math.random() * 0.12;
+    s.scale.set(sc, sc * (0.6 + Math.random() * 0.8), sc);
     scene.add(s);
-    const v = new THREE.Vector3((Math.random()-0.5)*2, 1 + Math.random()*1.5, (Math.random()-0.5)*2);
-    impacts.push({ obj: s, life: 0.6, vel: v, gravity: true });
+    const v = new THREE.Vector3(
+      (Math.random()-0.5)*3.0,
+      0.8 + Math.random()*2.2,
+      (Math.random()-0.5)*3.0
+    );
+    impacts.push({ obj: s, life: 0.55 + Math.random() * 0.20, vel: v, gravity: true,
+                   _baseScale: sc, _grow: 1.0, _fadeFrom: 0.55 });
   }
+
+  /* Dark blood pool decal on the surface below */
+  const poolGeo = new THREE.CircleGeometry(0.12 + Math.random() * 0.08, 12);
+  const poolMat = new THREE.MeshBasicMaterial({
+    color: 0x3d0000, transparent: true, opacity: 0.82, depthTest: true, depthWrite: false
+  });
+  const pool = new THREE.Mesh(poolGeo, poolMat);
+  pool.position.copy(point);
+  pool.position.y = terrainHeight(point.x, point.z) + 0.005;
+  pool.rotation.x = -Math.PI / 2;
+  pool.rotation.z = Math.random() * Math.PI;
+  scene.add(pool);
+  impacts.push({ obj: pool, life: 12.0, decay: 0.025, _baseScale: 1, _grow: 1, _fadeFrom: 1.0 });
+  _enforceImpactCap();
+}
+
+/* === EXPLOSION SHOCKWAVE =====================================================
+ * An expanding ring at ground level that quickly fades — gives the grenade
+ * a cinematic "pressure wave" feel without expensive post-processing. */
+const _shockRingGeo = new THREE.RingGeometry(0.2, 0.6, 32);
+function _spawnExplosionShockwave(pos) {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffcc80, transparent: true, opacity: 0.75,
+    side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending
+  });
+  const ring = new THREE.Mesh(_shockRingGeo, mat);
+  ring.rotation.x = -Math.PI / 2;
+  ring.position.copy(pos);
+  ring.position.y = terrainHeight(pos.x, pos.z) + 0.05;
+  ring.scale.setScalar(0.5);
+  scene.add(ring);
+  const outer = new THREE.Mesh(_shockRingGeo,
+    new THREE.MeshBasicMaterial({ color: 0xff9040, transparent: true, opacity: 0.5,
+      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
+  outer.rotation.x = -Math.PI / 2;
+  outer.position.copy(ring.position);
+  outer.scale.setScalar(0.3);
+  scene.add(outer);
+  impacts.push({ obj: ring,  life: 0.60, shockwave: true, _baseScale: 0.5, _grow: 22, _fadeFrom: 0.60 });
+  impacts.push({ obj: outer, life: 0.45, shockwave: true, _baseScale: 0.3, _grow: 28, _fadeFrom: 0.45 });
   _enforceImpactCap();
 }
 
@@ -9722,14 +9919,23 @@ function shoot() {
 
   /* Muzzle flash (suppressed: very dim, no visible flash) */
   if (player.suppressorOn) {
-    flashMat.opacity = 0.08;
-    flashLight.intensity = 0.3;
-    flash.scale.setScalar(0.08);
+    flashMat.opacity = 0.10;
+    _flashHaloMat.opacity = 0.05;
+    flashLight.intensity = 0.4;
+    flash.scale.setScalar(0.09);
   } else {
+    /* Core bright flash — randomize rotation for organic star shape */
+    const fScale = 0.52 + Math.random() * 0.30;
     flashMat.opacity = 1;
-    flashLight.intensity = 6;
     flash.material.rotation = Math.random() * Math.PI;
-    flash.scale.setScalar(0.4 + Math.random() * 0.25);
+    flash.scale.setScalar(fScale);
+    /* Halo ambient glow — slightly offset for parallax depth */
+    _flashHaloMat.opacity = 0.70 + Math.random() * 0.20;
+    /* Dynamic light — strong short burst; no shadow cast for perf */
+    flashLight.intensity = 9 + Math.random() * 5;
+    flashLight.color.setHex(0xffcc60 + (Math.random() > 0.5 ? 0x000800 : 0));
+    /* Screen flash overlay — brief bright flash on shotFlash HUD element */
+    if (typeof fxShotFlash === 'function') fxShotFlash();
   }
   /* World-space smoke puff at muzzle (drifts and fades, doesn't stick to gun) */
   spawnMuzzleSmoke();
@@ -11059,9 +11265,11 @@ function updatePlayer(dt) {
     player._appliedSwapRotX = sRotX;
   }
 
-  /* muzzle flash decay */
-  flashMat.opacity *= Math.pow(0.0001, dt);
-  flashLight.intensity *= Math.pow(0.0001, dt);
+  /* muzzle flash decay — fast decay keeps it punchy without burn-in */
+  const _flashDecay = Math.pow(0.00008, dt);
+  flashMat.opacity *= _flashDecay;
+  _flashHaloMat.opacity *= _flashDecay;
+  flashLight.intensity *= _flashDecay;
 
   /* update muzzle smoke puffs */
   for (let i = smokes.length - 1; i >= 0; i--) {
@@ -11074,8 +11282,10 @@ function updatePlayer(dt) {
       continue;
     }
     s.obj.position.addScaledVector(s.vel, dt);
-    s.obj.material.opacity = Math.max(0, s.life * 0.6);
-    s.obj.scale.multiplyScalar(1 + dt * 0.6);
+    /* Hot gas fades faster (shorter life), smoke lingers and grows */
+    const isHot = s.obj.material.blending === THREE.AdditiveBlending;
+    s.obj.material.opacity = Math.max(0, s.life * (isHot ? 2.8 : 0.55));
+    s.obj.scale.multiplyScalar(1 + dt * (isHot ? 1.2 : 0.7));
   }
 
   /* update ejected brass shells (gravity + bounce on terrain) */
@@ -12041,7 +12251,13 @@ function updateImpacts(dt) {
     /* Smoke / fire animations: grow scale toward _grow * _baseScale and
      * fade from _fadeFrom. Falls back to legacy /0.4 behaviour when the
      * impact entry doesn't carry the new fields. */
-    if (im._fadeFrom !== undefined && im._fadeFrom > 0) {
+    if (im.shockwave) {
+      /* Shockwave ring: expand fast, fade out linearly */
+      const t = 1.0 - (im.life / im._fadeFrom);
+      const scl = im._baseScale * (1 + im._grow * t);
+      im.obj.scale.set(scl, scl, scl);
+      if (im.obj.material) im.obj.material.opacity = Math.max(0, (1 - t) * 0.70);
+    } else if (im._fadeFrom !== undefined && im._fadeFrom > 0) {
       const t = 1.0 - (im.life / im._fadeFrom);
       if (im.obj.material) {
         im.obj.material.opacity = Math.max(0, im.obj.material.opacity || 0) * 0.985;
@@ -12804,12 +13020,17 @@ function fxSuppression(amount) {
 }
 function showHitMarker(zoneLabel) {
   if (!_fx.hitMarker) return;
-  _fx.hitMarker.classList.toggle('hs', zoneLabel === 'HEADSHOT');
+  const isHs = (zoneLabel === 'HEADSHOT');
+  _fx.hitMarker.classList.toggle('hs', isHs);
   _fx.hitMarker.style.transition = 'none';
   _fx.hitMarker.style.opacity = '1';
+  _fx.hitMarker.style.transform = isHs
+    ? 'translate(-50%, -50%) scale(1.3) rotate(0deg)'
+    : 'translate(-50%, -50%) scale(1.1) rotate(0deg)';
   void _fx.hitMarker.offsetWidth;
-  _fx.hitMarker.style.transition = 'opacity 0.3s linear';
+  _fx.hitMarker.style.transition = 'opacity 0.25s linear, transform 0.25s cubic-bezier(0.22,1,0.36,1)';
   _fx.hitMarker.style.opacity = '0';
+  _fx.hitMarker.style.transform = 'translate(-50%, -50%) scale(0.9) rotate(0deg)';
 }
 function showDamageDirection(sourceWorldPos) {
   if (!_fx.dmgArrow) return;
@@ -13187,8 +13408,16 @@ function updateGrenades(dt) {
 function detonateFrag(pos) {
   const RADIUS = 36.0;
   try { if (window.spawnMudSplat) { const _d = pos.distanceTo(player.position); if (_d < 24) window.spawnMudSplat(Math.max(0.5, 1.4 - _d / 24)); } } catch(_) {}
-  /* Visual */
-  try { spawnFireBurst(pos, 1.7); } catch(_){}
+  /* Visual — layered explosion with shockwave ring */
+  try {
+    spawnFireBurst(pos, 2.4);
+    /* Shockwave ring — expanding disc at ground level */
+    if (typeof _spawnExplosionShockwave === 'function') _spawnExplosionShockwave(pos);
+    /* Camera shake from explosion light */
+    if (typeof flashLight !== 'undefined' && pos.distanceTo(player.position) < 30) {
+      flashLight.intensity = Math.max(flashLight.intensity, 4.0);
+    }
+  } catch(_){}
   /* Audio */
   if (audioCtx) {
     const t = audioCtx.currentTime;
@@ -14076,9 +14305,11 @@ function animate() {
     const moveCA = Math.min(1, Math.hypot(player.velocity.x, player.velocity.z) / 8);
     const u = bodycamPass.uniforms;
     u.uTime.value       = _camFX.time;
-    u.uAberration.value = 0.0011 + turn * 0.0026 + moveCA * 0.0006;
-    u.uGrain.value      = 0.062 + (player.health < 30 ? 0.05 : 0.0);
-    u.uVignette.value   = 0.30 + _camFX.hurt * 0.18;
+    /* Aberration: barely perceptible at rest, spikes only on rapid camera turn */
+    u.uAberration.value = 0.0004 + turn * 0.0010 + moveCA * 0.0002;
+    /* Grain: very subtle film texture — rises slightly at low HP for dramatic effect */
+    u.uGrain.value      = 0.014 + (player.health < 30 ? 0.016 : 0.0);
+    u.uVignette.value   = 0.28 + _camFX.hurt * 0.20;
     u.uDamage.value     = _camFX.hurt;
   }
   /* STAGE 3 — advance the lens-rain droplet animation clock */
