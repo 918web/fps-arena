@@ -1,0 +1,8 @@
+ak74_modular.html    установок 9  медиана 14 мс  худшая 51 мс  (linear_ak 6, dtk4m 18, hex_wolverine 16, stock_pt 12, mag545_black 18, mag545_45 14, mag545_drum 51, grip_rk3 14, grip_moe_ak 12)
+akm.html             установок 10  медиана 15 мс  худшая 106 мс  (linear_ak 5, dtk4m 106, hex_wolverine 42, stock_akms 5, stock_pt 13, mag762_bak 17, mag762_pmag 16, mag762_40 14, grip_rk3 15, grip_moe_ak 15)
+glock18c.html        установок 6  медиана 12 мс  худшая 82 мс  (g_cap 12, g_comp 4, osprey9 4, gm19 16, gm33 11, gdrum50 82)
+m416.html            установок 18  медиана 33 мс  худшая 169 мс  (t2_lrp 169, compm4 85, sf_socom556 44, bt_rotex_hk 36, kac_nt4 15, ctr 17, sopmod 11, pmag30 48, pmag30w 62, pmag40 66, moe_grip 14, bcm_mod3 14, m600 28, m300 33, m640 50, rvg 7, bcm_vg 7, afg2 8)
+mp5a3.html           установок 8  медиана 9 мс  худшая 32 мс  (hk_fh 5, bt_comp 3, bt_supp 6, stock_a2 9, endcap 4, mag15 10, mag40 9, drum50 32)
+remington870.html    установок 0  медиана NaN мс  худшая NaN мс  ()
+scar-h.html          установок 18  медиана 28 мс  худшая 153 мс  (t2_lrp 153, compm4 117, sf_socom762 72, warcomp762 9, pa_brake762 6, scar_prs 44, fn20fde 16, pmag20 28, pmag25 12, hk_v2 15, moe_grip 38, bcm_mod3 11, m600 59, m300 37, m640 136, rvg 5, bcm_vg 6, afg2 6)
+svd.html             установок 7  медиана 22 мс  худшая 78 мс  (svd_dtk 16, rotor43 22, st_poly 16, st_svds 42, st_svdm 46, mag10p 16, mag20 78)

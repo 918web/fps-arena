@@ -1,0 +1,10 @@
+akm.html@high               boot 84.4s warm 0.4s | view 976.3 fire 1107.6 scope 1207 ads 1182.7 night 1174.9 fireN 1297.7 ms | hitch max 3701 progs 5 | calls 158 tris 192814 prog 35 | swap p50 23.2 max 65.2
+ak74_modular.html@high      boot 113s warm 0.2s | view 1012.2 fire 1121.2 scope 1209.8 ads 1167 night 1169.9 fireN 1294.3 ms | hitch max 3696.8 progs 5 | calls 173 tris 229834 prog 34 | swap p50 32 max 148.9
+m416.html@high              boot 20.9s warm 0s | view 1078 fire 1190.7 scope 1260.5 ads 1208.6 night 1351.4 fireN 1669.2 ms | hitch max 6730.5 progs 23 | calls 206 tris 326818 prog 34 | swap p50 45.4 max 98.9
+scar-h.html@high            boot 23s warm 0.1s | view 1011.6 fire 1178.7 scope 1262.8 ads 1205.2 night 1266.8 fireN 1669.1 ms | hitch max 6678.7 progs 21 | calls 216 tris 308742 prog 35 | swap p50 42.1 max 120.6
+glock18c.html@high          boot 53.8s warm 0s | view 897.5 fire 968.2 scope 906.4 ads 1027.8 night 1075.9 fireN 1137.8 ms | hitch max 2245.9 progs 6 | calls 137 tris 84478 prog 34 | swap p50 9.3 max 34.3
+mp5a3.html@high             boot 22s warm 0s | view 934.4 fire 993 scope 947.6 ads 1587.9 night 984.2 fireN 1020.7 ms | hitch max 1433.9 progs 0 | calls 170 tris 157348 prog 34 | swap p50 6.4 max 61.8
+remington870.html@high      boot 88.2s warm 0.3s | view 797.1 fire 843.8 scope 839.7 ads 1077.8 night 871.5 fireN 870.3 ms | hitch max 1365.9 progs 0 | calls 147 tris 85422 prog 35 | swap p50 1.7 max 2.6
+svd.html@high               boot 87.8s warm 0s | view 975 fire 1068.5 scope 1016.5 ads 1101.7 night 1059 fireN 1104.1 ms | hitch max 2105.4 progs 0 | calls 207 tris 175108 prog 41 | swap p50 20.6 max 130
+akm.html@low                boot 107.2s warm 0.2s | view 748.6 fire 831.4 scope 915.4 ads 929.2 night 829.9 fireN 1026.5 ms | hitch max 3399.9 progs 5 | calls 158 tris 192814 prog 37 | swap p50 15 max 125.6
+glock18c.html@low           boot 75.2s warm 0.3s | view 636.1 fire 674.8 scope 642.6 ads 763.7 night 748.3 fireN 763.8 ms | hitch max 2006.9 progs 6 | calls 137 tris 84478 prog 36 | swap p50 12.7 max 39.8

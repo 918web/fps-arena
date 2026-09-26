@@ -171,6 +171,8 @@ async function boot(def, lib) {
   function applyConfig(next, opts = {}) {
     pip.release();
     cfg = asm.apply(next);
+    // побывавший на оружии модуль уже на GPU: из кэша предсборки его не выбрасываем
+    for (const it of asm.installed.values()) it.obj.userData.shown = true;
     const magInfo = asm.info("mag")?.mag;
     const prevCap = st.cap;
     st.cap = magInfo?.cap || def.base.mag || 30;
@@ -1836,6 +1838,62 @@ async function boot(def, lib) {
   app.invalidate = () => {
     sceneDirty = true;
   };
+  /* ---------------------------------------------------------- предсборка модулей в простое */
+  // Процедурная сборка модуля занимает 5–400 мс главного потока (дольше всех — большие прицелы), и
+  // раньше она шла прямо в момент клика. Теперь модули открытого слота и модуль под курсором
+  // собираются заранее, по одному за простой и только пока кадры не рисуются. Клик берёт готовое
+  // из asm.cache. Собрать всё сразу нельзя: это ~140 МБ и секунды CPU, поэтому держим ограниченное
+  // число заготовок, лишние (ни разу не показанные, без GPU-ресурсов) выбрасываем.
+  const pre = { q: [], lru: [], busyT: 0, pending: false };
+  const PRE_KEEP = 24, PRE_SLOT = 12;
+  const ric = window.requestIdleCallback || ((f) => setTimeout(() => f({ timeRemaining: () => 12, didTimeout: false }), 50));
+  function preSchedule() {
+    if (pre.pending || !pre.q.length) return;
+    pre.pending = true;
+    ric(prePump);
+  }
+  function prePump(dl) {
+    pre.pending = false;
+    if (performance.now() - pre.busyT < 300 || dl.timeRemaining() < 8) {
+      setTimeout(preSchedule, 150);
+      return;
+    }
+    const e = pre.q.shift();
+    if (e && !asm.cache.has(e.key) && asm.part(e.id)) {
+      try {
+        asm.built(e.slotId, asm.part(e.id));
+        pre.lru.push(e.key);
+      } catch (err) {
+        console.warn("prebuild", e.key, err);
+      }
+      while (pre.lru.length > PRE_KEEP) {
+        const k = pre.lru.shift(), c = asm.cache.get(k);
+        if (c && !c.obj.userData.shown) asm.cache.delete(k);
+      }
+    }
+    preSchedule();
+  }
+  function prebuild(slotId, ids, urgent = false) {
+    for (const id of urgent ? [...ids].reverse() : ids) {
+      const key = slotId + "|" + id;
+      if (asm.cache.has(key)) continue;
+      const i = pre.q.findIndex((e) => e.key === key);
+      if (i >= 0) {
+        if (!urgent) continue;
+        pre.q.splice(i, 1);
+      }
+      const e = { key, slotId, id };
+      if (urgent) pre.q.unshift(e);
+      else pre.q.push(e);
+    }
+    preSchedule();
+  }
+  // модуль под курсором — первым; открытый слот — его варианты по порядку списка
+  app.prebuild = (slotId, id) => id && prebuild(slotId, [id], true);
+  app.prebuildSlot = (slotId) => {
+    const slot2 = def.slots.find((s) => s.id === slotId);
+    if (slot2) prebuild(slotId, asm.slotOptions(slot2).slice(0, PRE_SLOT).map((p) => p.id));
+  };
   /* ---------------------------------------------------------- качество картинки */
   // Стартовый уровень — по видеокарте: программный рендер и телефоны — «низкое», встроенная графика —
   // «среднее», дискретная — «высокое» (исходная картинка). Дальше уровень подстраивается по времени
@@ -1991,6 +2049,90 @@ async function boot(def, lib) {
     pip.render({ lens, gun, pos, dir: pipDir, up: pipUp, fov, retTex: rs.src?.retMesh?.material.map, retK, retMesh: s.id === "magnifier" ? null : rs.src?.retMesh }, S.camera, innerHeight);
   }
   app.pip = pip;
+  /* ---------------------------------------------------------- прогрев шейдеров в фоне */
+  // Раньше при загрузке компилировались только материалы стоящих на оружии модулей, а первая
+  // установка прицела, фонаря, деревянного приклада, включение второго фонаря (другой набор
+  // источников света у всех материалов) компилировали программы прямо в кадре — фриз от десятков
+  // миллисекунд до секунд на слабой видеокарте. Теперь после загрузки в фоне готовятся все материалы
+  // библиотеки, их полупрозрачные копии (размытый диоптр, стекло фонарей), служебные материалы
+  // (нормали GTAO, глубина теней, инстансы гильз), марка сетки и PiP — в обоих вариантах освещения.
+  // compileAsync не ждёт компиляции (KHR_parallel_shader_compile), крошечные меши живут в сцене
+  // только на время синхронного вызова. Цель рендера — буфер сцены композитора, чтобы варианты
+  // программ совпали с настоящим кадром. Экран загрузки из-за этого дольше не висит.
+  const warmGrp = new THREE8.Group();
+  {
+    const g = new THREE8.BoxGeometry(1e-3, 1e-3, 1e-3);
+    const add = (m, inst = false) => {
+      const o = inst ? new THREE8.InstancedMesh(g, m, 1) : new THREE8.Mesh(g, m);
+      o.castShadow = o.receiveShadow = true;
+      o.frustumCulled = false;
+      warmGrp.add(o);
+    };
+    for (const m of new Set(Object.values(mats.all))) {
+      add(m);
+      if (!m.transparent) {
+        const t = m.clone();
+        t.transparent = true;
+        t.depthWrite = false;
+        add(t);
+      }
+    }
+    const depthM = [THREE8.FrontSide, THREE8.BackSide, THREE8.DoubleSide].map((side) => new THREE8.MeshDepthMaterial({ depthPacking: THREE8.RGBADepthPacking, side }));
+    for (const m of [S.post.gtao.normalMaterial, ...depthM]) {
+      add(m);
+      add(m, true);
+    }
+    add(new THREE8.MeshBasicMaterial({ map: mats.tex.rough, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
+    add(pip.material(new THREE8.Mesh(g, mats.all.glass)));
+  }
+  const compileWarm = () => {
+    const R0 = S.renderer, prev = R0.getRenderTarget();
+    aim.add(warmGrp);
+    R0.setRenderTarget(S.post.composer.readBuffer);
+    try {
+      return R0.compileAsync(S.scene, S.camera);
+    } finally {
+      R0.setRenderTarget(prev);
+      aim.remove(warmGrp);
+    }
+  };
+  const idleOnly = (fn) => ric(function tick(dl) {
+    if (performance.now() - pre.busyT < 300 || dl.timeRemaining() < 6) return setTimeout(() => ric(tick), 120);
+    fn(dl);
+  });
+  app.warm = new Promise((done) => {
+    idleOnly(async () => {
+      const spot2 = fx.rigs?.[1]?.spot;
+      try {
+        const jobs = [compileWarm()];
+        if (spot2 && !spot2.visible) {
+          spot2.visible = true;
+          try {
+            jobs.push(compileWarm());
+          } finally {
+            spot2.visible = false;
+          }
+        }
+        await Promise.all(jobs);
+      } catch (e) {
+        console.warn("warm", e);
+      }
+      // Без KHR_parallel_shader_compile драйвер доделывает программу при первом использовании —
+      // это делаем сами, по одной в простое, а не в кадре. С расширением это лишь чтение uniform-ов.
+      const list = [...S.renderer.info.programs];
+      const next = () => idleOnly((dl) => {
+        while (list.length && dl.timeRemaining() > 4) {
+          try {
+            list.shift().getUniforms();
+          } catch (e) {
+          }
+        }
+        if (list.length) next();
+        else done();
+      });
+      next();
+    });
+  });
   const loop = () => {
     requestAnimationFrame(loop);
     if (window.__pause) return;
@@ -2001,6 +2143,7 @@ async function boot(def, lib) {
     const active = busy || camDirty;
     idleT = active ? 0 : idleT + raw;
     const still = !active && idleT > 0.35 && curDpr !== maxDpr;
+    if (active) pre.busyT = performance.now();
     if (!active && !sceneDirty && !still) return;
     if (active) {
       setDpr(activeDpr);

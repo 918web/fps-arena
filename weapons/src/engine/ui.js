@@ -163,7 +163,10 @@ var UI = class {
         row.innerHTML = `<span class="m-l">${esc(slot2.label)}</span><span class="m-v">${esc(part ? part.name : "нет")}</span><span class="m-c">${this.open === slot2.id ? "–" : "+"}</span>`;
         row.onclick = () => {
           this.open = this.open === slot2.id ? null : slot2.id;
-          if (this.open) this.app.focusSlot(slot2.id);
+          if (this.open) {
+            this.app.focusSlot(slot2.id);
+            this.app.prebuildSlot?.(slot2.id);
+          }
           else this.app.unfocus();
           this.renderMods();
         };
@@ -210,6 +213,7 @@ var UI = class {
         e.innerHTML = `<div class="o-n">${esc(part.name)}</div><div class="o-d">${esc(why ? "⚠ " + why : part.desc || "")}</div><div class="o-c">${chips}${w}</div>`;
       }
       e.disabled = !!why;
+      if (part && !on) e.onpointerenter = () => a.prebuild?.(slot2.id, part.id);
       e.onclick = () => {
         if (!on) a.setPart(slot2.id, part ? part.id : null);
       };
@@ -364,6 +368,7 @@ var UI = class {
     this.root.classList.add("show-mods");
     this.open = id;
     this.app.focusSlot(id);
+    this.app.prebuildSlot?.(id);
     this.renderMods();
     const r = this.modsBody.querySelector(".m-row.open");
     if (r) r.scrollIntoView({ block: "nearest", behavior: "smooth" });

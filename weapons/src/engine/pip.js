@@ -140,9 +140,14 @@ var PipScope = class {
     const vis = o.gun.visible;
     o.gun.visible = false;
     const prev = this.R.getRenderTarget();
+    // карты теней обновляет основной кадр: иначе этот проход (без оружия) забирал флаг обновления,
+    // и в основном кадре ствол оставался без собственной тени, пока стоит оптика
+    const sm = this.R.shadowMap, shadowNeeds = sm.needsUpdate;
+    sm.needsUpdate = false;
     this.R.setRenderTarget(rt);
     this.R.render(this.scene, cam);
     this.R.setRenderTarget(prev);
+    sm.needsUpdate = shadowNeeds;
     o.gun.visible = vis;
     u.uLive.value = 1;
     return true;

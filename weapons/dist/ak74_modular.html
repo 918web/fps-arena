@@ -530,8 +530,29 @@ function createScene(canvasHost) {
   composer.addPass(bloom);
   hdrGuardPass(bloom.materialHighPassFilter, "vec4 texel = texture2D( tDiffuse, vUv );");
   const outPass = new OutputPass();
-  outPass.material.fragmentShader = outPass.material.fragmentShader.replace("gl_FragColor = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\n" + HDR_SAFE1("texel.rgb") + "\ngl_FragColor = texel;");
+  // Пост-обработка без промежуточных полноэкранных проходов. Раньше GTAO копировал кадр во второй
+  // буфер и домножал его на AO, bloom дорисовывал свечение поверх — три лишних чтения/записи кадра
+  // в HDR, да ещё в MSAA-буфер 4× (буферы композитора менялись ролями каждый кадр). Теперь AO и
+  // свечение применяются в самом OutputPass (AO — ещё и на входе bloom) по той же формуле и с той же
+  // выборкой текстур: картинка та же, а в полном разрешении остаётся один проход. Второй буфер
+  // композитора больше не используется и на GPU не выделяется.
+  const aoTex = gtao.pdRenderTarget.texture, bloomTex = bloom.renderTargetsHorizontal[0].texture;
+  gtao.output = GTAOPass.OUTPUT.Off;
+  gtao.needsSwap = false;
+  const hp = bloom.materialHighPassFilter;
+  Object.assign(hp.uniforms, { tAO: { value: aoTex }, uAOk: { value: 0 } });
+  hp.fragmentShader = hp.fragmentShader.replace("uniform sampler2D tDiffuse;", "uniform sampler2D tDiffuse;\nuniform sampler2D tAO;\nuniform float uAOk;").replace("vec4 texel = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\ntexel.rgb *= mix( vec3( 1.0 ), texture2D( tAO, vUv ).rgb, uAOk );");
+  const bloomQuadRender = bloom.fsQuad.render.bind(bloom.fsQuad);
+  bloom.fsQuad.render = (r) => {
+    if (bloom.fsQuad.material !== bloom.blendMaterial) bloomQuadRender(r);
+  };
+  Object.assign(outPass.material.uniforms, { tAO: { value: aoTex }, uAOk: { value: 0 }, tBloom: { value: bloomTex }, uBloomK: { value: 0 } });
+  // свечение раньше накладывалось смешиванием AdditiveBlending (SRC_ALPHA, ONE) — отсюда множитель .a
+  outPass.material.fragmentShader = outPass.material.fragmentShader.replace("uniform sampler2D tDiffuse;", "uniform sampler2D tDiffuse;\nuniform sampler2D tAO, tBloom;\nuniform float uAOk, uBloomK;").replace("gl_FragColor = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\ntexel.rgb *= mix( vec3( 1.0 ), texture2D( tAO, vUv ).rgb, uAOk );\nvec4 bl = texture2D( tBloom, vUv );\ntexel.rgb += bl.rgb * bl.a * uBloomK;\n" + HDR_SAFE1("texel.rgb") + "\ngl_FragColor = texel;");
+  outPass.needsSwap = false;
   composer.addPass(outPass);
+  // сцена рисуется в readBuffer (у EffectComposer это renderTarget2); MSAA нужен только ему
+  composer.writeBuffer.samples = 0;
   const post = { composer, gtao, bloom };
   // Уровни качества. «Высокое» — исходная картинка: AO в полном разрешении, 16 сэмплов, MSAA 4×,
   // тени 4096/2048. Ниже — те же эффекты дешевле: AO в половинном разрешении с меньшим числом
@@ -566,7 +587,7 @@ function createScene(canvasHost) {
     const q = QUALITY[qi];
     gtao.updateGtaoMaterial({ samples: q.aoS });
     gtao.updatePdMaterial({ samples: q.pdS });
-    for (const t of [composer.renderTarget1, composer.renderTarget2]) if (t.samples !== q.msaa) {
+    for (const t of [composer.readBuffer]) if (t.samples !== q.msaa) {
       t.samples = q.msaa;
       t.dispose();
     }
@@ -581,6 +602,11 @@ function createScene(canvasHost) {
     bloom.threshold = 1.15 / e;
     bloom.strength = night ? 0.55 : 0.22;
     gtao.blendIntensity = night ? 0.4 : 0.85;
+    const aoK = gtao.enabled ? gtao.blendIntensity : 0;
+    hp.uniforms.uAOk.value = aoK;
+    const ou = outPass.material.uniforms;
+    ou.uAOk.value = aoK;
+    ou.uBloomK.value = bloom.enabled ? 1 : 0;
     composer.render();
   };
   const resize = () => {
@@ -5386,7 +5412,10 @@ var UI = class {
         row.innerHTML = `<span class="m-l">${esc(slot2.label)}</span><span class="m-v">${esc(part ? part.name : "нет")}</span><span class="m-c">${this.open === slot2.id ? "–" : "+"}</span>`;
         row.onclick = () => {
           this.open = this.open === slot2.id ? null : slot2.id;
-          if (this.open) this.app.focusSlot(slot2.id);
+          if (this.open) {
+            this.app.focusSlot(slot2.id);
+            this.app.prebuildSlot?.(slot2.id);
+          }
           else this.app.unfocus();
           this.renderMods();
         };
@@ -5433,6 +5462,7 @@ var UI = class {
         e.innerHTML = `<div class="o-n">${esc(part.name)}</div><div class="o-d">${esc(why ? "⚠ " + why : part.desc || "")}</div><div class="o-c">${chips}${w}</div>`;
       }
       e.disabled = !!why;
+      if (part && !on) e.onpointerenter = () => a.prebuild?.(slot2.id, part.id);
       e.onclick = () => {
         if (!on) a.setPart(slot2.id, part ? part.id : null);
       };
@@ -5587,6 +5617,7 @@ var UI = class {
     this.root.classList.add("show-mods");
     this.open = id;
     this.app.focusSlot(id);
+    this.app.prebuildSlot?.(id);
     this.renderMods();
     const r = this.modsBody.querySelector(".m-row.open");
     if (r) r.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -5769,9 +5800,14 @@ var PipScope = class {
     const vis = o.gun.visible;
     o.gun.visible = false;
     const prev = this.R.getRenderTarget();
+    // карты теней обновляет основной кадр: иначе этот проход (без оружия) забирал флаг обновления,
+    // и в основном кадре ствол оставался без собственной тени, пока стоит оптика
+    const sm = this.R.shadowMap, shadowNeeds = sm.needsUpdate;
+    sm.needsUpdate = false;
     this.R.setRenderTarget(rt);
     this.R.render(this.scene, cam);
     this.R.setRenderTarget(prev);
+    sm.needsUpdate = shadowNeeds;
     o.gun.visible = vis;
     u.uLive.value = 1;
     return true;
@@ -5958,6 +5994,8 @@ async function boot(def, lib) {
   function applyConfig(next, opts = {}) {
     pip.release();
     cfg = asm.apply(next);
+    // побывавший на оружии модуль уже на GPU: из кэша предсборки его не выбрасываем
+    for (const it of asm.installed.values()) it.obj.userData.shown = true;
     const magInfo = asm.info("mag")?.mag;
     const prevCap = st.cap;
     st.cap = magInfo?.cap || def.base.mag || 30;
@@ -7623,6 +7661,62 @@ async function boot(def, lib) {
   app.invalidate = () => {
     sceneDirty = true;
   };
+  /* ---------------------------------------------------------- предсборка модулей в простое */
+  // Процедурная сборка модуля занимает 5–400 мс главного потока (дольше всех — большие прицелы), и
+  // раньше она шла прямо в момент клика. Теперь модули открытого слота и модуль под курсором
+  // собираются заранее, по одному за простой и только пока кадры не рисуются. Клик берёт готовое
+  // из asm.cache. Собрать всё сразу нельзя: это ~140 МБ и секунды CPU, поэтому держим ограниченное
+  // число заготовок, лишние (ни разу не показанные, без GPU-ресурсов) выбрасываем.
+  const pre = { q: [], lru: [], busyT: 0, pending: false };
+  const PRE_KEEP = 24, PRE_SLOT = 12;
+  const ric = window.requestIdleCallback || ((f) => setTimeout(() => f({ timeRemaining: () => 12, didTimeout: false }), 50));
+  function preSchedule() {
+    if (pre.pending || !pre.q.length) return;
+    pre.pending = true;
+    ric(prePump);
+  }
+  function prePump(dl) {
+    pre.pending = false;
+    if (performance.now() - pre.busyT < 300 || dl.timeRemaining() < 8) {
+      setTimeout(preSchedule, 150);
+      return;
+    }
+    const e = pre.q.shift();
+    if (e && !asm.cache.has(e.key) && asm.part(e.id)) {
+      try {
+        asm.built(e.slotId, asm.part(e.id));
+        pre.lru.push(e.key);
+      } catch (err) {
+        console.warn("prebuild", e.key, err);
+      }
+      while (pre.lru.length > PRE_KEEP) {
+        const k = pre.lru.shift(), c = asm.cache.get(k);
+        if (c && !c.obj.userData.shown) asm.cache.delete(k);
+      }
+    }
+    preSchedule();
+  }
+  function prebuild(slotId, ids, urgent = false) {
+    for (const id of urgent ? [...ids].reverse() : ids) {
+      const key = slotId + "|" + id;
+      if (asm.cache.has(key)) continue;
+      const i = pre.q.findIndex((e) => e.key === key);
+      if (i >= 0) {
+        if (!urgent) continue;
+        pre.q.splice(i, 1);
+      }
+      const e = { key, slotId, id };
+      if (urgent) pre.q.unshift(e);
+      else pre.q.push(e);
+    }
+    preSchedule();
+  }
+  // модуль под курсором — первым; открытый слот — его варианты по порядку списка
+  app.prebuild = (slotId, id) => id && prebuild(slotId, [id], true);
+  app.prebuildSlot = (slotId) => {
+    const slot2 = def.slots.find((s) => s.id === slotId);
+    if (slot2) prebuild(slotId, asm.slotOptions(slot2).slice(0, PRE_SLOT).map((p) => p.id));
+  };
   /* ---------------------------------------------------------- качество картинки */
   // Стартовый уровень — по видеокарте: программный рендер и телефоны — «низкое», встроенная графика —
   // «среднее», дискретная — «высокое» (исходная картинка). Дальше уровень подстраивается по времени
@@ -7778,6 +7872,90 @@ async function boot(def, lib) {
     pip.render({ lens, gun, pos, dir: pipDir, up: pipUp, fov, retTex: rs.src?.retMesh?.material.map, retK, retMesh: s.id === "magnifier" ? null : rs.src?.retMesh }, S.camera, innerHeight);
   }
   app.pip = pip;
+  /* ---------------------------------------------------------- прогрев шейдеров в фоне */
+  // Раньше при загрузке компилировались только материалы стоящих на оружии модулей, а первая
+  // установка прицела, фонаря, деревянного приклада, включение второго фонаря (другой набор
+  // источников света у всех материалов) компилировали программы прямо в кадре — фриз от десятков
+  // миллисекунд до секунд на слабой видеокарте. Теперь после загрузки в фоне готовятся все материалы
+  // библиотеки, их полупрозрачные копии (размытый диоптр, стекло фонарей), служебные материалы
+  // (нормали GTAO, глубина теней, инстансы гильз), марка сетки и PiP — в обоих вариантах освещения.
+  // compileAsync не ждёт компиляции (KHR_parallel_shader_compile), крошечные меши живут в сцене
+  // только на время синхронного вызова. Цель рендера — буфер сцены композитора, чтобы варианты
+  // программ совпали с настоящим кадром. Экран загрузки из-за этого дольше не висит.
+  const warmGrp = new THREE8.Group();
+  {
+    const g = new THREE8.BoxGeometry(1e-3, 1e-3, 1e-3);
+    const add = (m, inst = false) => {
+      const o = inst ? new THREE8.InstancedMesh(g, m, 1) : new THREE8.Mesh(g, m);
+      o.castShadow = o.receiveShadow = true;
+      o.frustumCulled = false;
+      warmGrp.add(o);
+    };
+    for (const m of new Set(Object.values(mats.all))) {
+      add(m);
+      if (!m.transparent) {
+        const t = m.clone();
+        t.transparent = true;
+        t.depthWrite = false;
+        add(t);
+      }
+    }
+    const depthM = [THREE8.FrontSide, THREE8.BackSide, THREE8.DoubleSide].map((side) => new THREE8.MeshDepthMaterial({ depthPacking: THREE8.RGBADepthPacking, side }));
+    for (const m of [S.post.gtao.normalMaterial, ...depthM]) {
+      add(m);
+      add(m, true);
+    }
+    add(new THREE8.MeshBasicMaterial({ map: mats.tex.rough, transparent: true, depthTest: false, depthWrite: false, toneMapped: false }));
+    add(pip.material(new THREE8.Mesh(g, mats.all.glass)));
+  }
+  const compileWarm = () => {
+    const R0 = S.renderer, prev = R0.getRenderTarget();
+    aim.add(warmGrp);
+    R0.setRenderTarget(S.post.composer.readBuffer);
+    try {
+      return R0.compileAsync(S.scene, S.camera);
+    } finally {
+      R0.setRenderTarget(prev);
+      aim.remove(warmGrp);
+    }
+  };
+  const idleOnly = (fn) => ric(function tick(dl) {
+    if (performance.now() - pre.busyT < 300 || dl.timeRemaining() < 6) return setTimeout(() => ric(tick), 120);
+    fn(dl);
+  });
+  app.warm = new Promise((done) => {
+    idleOnly(async () => {
+      const spot2 = fx.rigs?.[1]?.spot;
+      try {
+        const jobs = [compileWarm()];
+        if (spot2 && !spot2.visible) {
+          spot2.visible = true;
+          try {
+            jobs.push(compileWarm());
+          } finally {
+            spot2.visible = false;
+          }
+        }
+        await Promise.all(jobs);
+      } catch (e) {
+        console.warn("warm", e);
+      }
+      // Без KHR_parallel_shader_compile драйвер доделывает программу при первом использовании —
+      // это делаем сами, по одной в простое, а не в кадре. С расширением это лишь чтение uniform-ов.
+      const list = [...S.renderer.info.programs];
+      const next = () => idleOnly((dl) => {
+        while (list.length && dl.timeRemaining() > 4) {
+          try {
+            list.shift().getUniforms();
+          } catch (e) {
+          }
+        }
+        if (list.length) next();
+        else done();
+      });
+      next();
+    });
+  });
   const loop = () => {
     requestAnimationFrame(loop);
     if (window.__pause) return;
@@ -7788,6 +7966,7 @@ async function boot(def, lib) {
     const active = busy || camDirty;
     idleT = active ? 0 : idleT + raw;
     const still = !active && idleT > 0.35 && curDpr !== maxDpr;
+    if (active) pre.busyT = performance.now();
     if (!active && !sceneDirty && !still) return;
     if (active) {
       setDpr(activeDpr);

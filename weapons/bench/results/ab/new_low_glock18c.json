@@ -1,0 +1,126 @@
+{
+ "meta": {
+  "dir": "/tmp/hoplite/workspace/repo-repo_1314023772/weapons/dist",
+  "W": 640,
+  "H": 360,
+  "CPU": 1,
+  "STEPS": 8,
+  "date": "2026-09-26T14:59:40.429Z",
+  "ua": "153.0.8010.12"
+ },
+ "runs": {
+  "glock18c.html@low": {
+   "boot": 21458,
+   "errors": [],
+   "warmMs": 12777.5,
+   "step": {
+    "view": {
+     "med": 567,
+     "p90": 572.5999999996275,
+     "mean": 559.7749999999069
+    },
+    "fire": {
+     "med": 620,
+     "p90": 664.3999999985099,
+     "mean": 618.2624999997206
+    },
+    "scope": {
+     "med": 568.2000000011176,
+     "p90": 627.5,
+     "mean": 575.0374999998603
+    },
+    "ads": {
+     "med": 695.5999999996275,
+     "p90": 725.2999999988824,
+     "mean": 688.4249999998137
+    },
+    "night": {
+     "med": 677,
+     "p90": 713.5,
+     "mean": 669.3249999999534
+    },
+    "fireNight": {
+     "med": 717.5,
+     "p90": 768.7999999988824,
+     "mean": 720.5500000000466
+    }
+   },
+   "infos": {
+    "view": {
+     "calls": 134,
+     "tris": 84475,
+     "programs": 95,
+     "geometries": 107,
+     "textures": 44
+    },
+    "fire": {
+     "calls": 153,
+     "tris": 85381,
+     "programs": 95,
+     "geometries": 107,
+     "textures": 46
+    },
+    "ads": {
+     "calls": 227,
+     "tris": 87077,
+     "programs": 95,
+     "geometries": 135,
+     "textures": 59
+    },
+    "night": {
+     "calls": 190,
+     "tris": 109193,
+     "programs": 95,
+     "geometries": 149,
+     "textures": 63
+    }
+   },
+   "hitch": {
+    "firstShot": {
+     "ms": 1050.4000000003725,
+     "programs": 0
+    },
+    "firstOptic": {
+     "ms": 592.7999999988824,
+     "programs": 0
+    },
+    "adsOn": {
+     "ms": 577.6999999992549,
+     "programs": 0
+    },
+    "firstLight": {
+     "ms": 1338.199999999255,
+     "programs": 0
+    },
+    "night": {
+     "ms": 628.8000000007451,
+     "programs": 0
+    },
+    "lightOn": {
+     "ms": 1000,
+     "programs": 0
+    }
+   },
+   "optic": null,
+   "light": {
+    "slot": "light",
+    "id": "tlr8a"
+   },
+   "light2": null,
+   "swaps": [
+    38.100000001490116,
+    6.699999999254942,
+    6.900000000372529,
+    5.5,
+    1.599999999627471,
+    12.200000001117587,
+    58.19999999925494,
+    120.09999999962747,
+    1
+   ],
+   "swapsPre": [],
+   "live": null,
+   "heapMB": 35.572052001953125
+  }
+ }
+}

@@ -345,8 +345,29 @@ function createScene(canvasHost) {
   composer.addPass(bloom);
   hdrGuardPass(bloom.materialHighPassFilter, "vec4 texel = texture2D( tDiffuse, vUv );");
   const outPass = new OutputPass();
-  outPass.material.fragmentShader = outPass.material.fragmentShader.replace("gl_FragColor = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\n" + HDR_SAFE1("texel.rgb") + "\ngl_FragColor = texel;");
+  // Пост-обработка без промежуточных полноэкранных проходов. Раньше GTAO копировал кадр во второй
+  // буфер и домножал его на AO, bloom дорисовывал свечение поверх — три лишних чтения/записи кадра
+  // в HDR, да ещё в MSAA-буфер 4× (буферы композитора менялись ролями каждый кадр). Теперь AO и
+  // свечение применяются в самом OutputPass (AO — ещё и на входе bloom) по той же формуле и с той же
+  // выборкой текстур: картинка та же, а в полном разрешении остаётся один проход. Второй буфер
+  // композитора больше не используется и на GPU не выделяется.
+  const aoTex = gtao.pdRenderTarget.texture, bloomTex = bloom.renderTargetsHorizontal[0].texture;
+  gtao.output = GTAOPass.OUTPUT.Off;
+  gtao.needsSwap = false;
+  const hp = bloom.materialHighPassFilter;
+  Object.assign(hp.uniforms, { tAO: { value: aoTex }, uAOk: { value: 0 } });
+  hp.fragmentShader = hp.fragmentShader.replace("uniform sampler2D tDiffuse;", "uniform sampler2D tDiffuse;\nuniform sampler2D tAO;\nuniform float uAOk;").replace("vec4 texel = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\ntexel.rgb *= mix( vec3( 1.0 ), texture2D( tAO, vUv ).rgb, uAOk );");
+  const bloomQuadRender = bloom.fsQuad.render.bind(bloom.fsQuad);
+  bloom.fsQuad.render = (r) => {
+    if (bloom.fsQuad.material !== bloom.blendMaterial) bloomQuadRender(r);
+  };
+  Object.assign(outPass.material.uniforms, { tAO: { value: aoTex }, uAOk: { value: 0 }, tBloom: { value: bloomTex }, uBloomK: { value: 0 } });
+  // свечение раньше накладывалось смешиванием AdditiveBlending (SRC_ALPHA, ONE) — отсюда множитель .a
+  outPass.material.fragmentShader = outPass.material.fragmentShader.replace("uniform sampler2D tDiffuse;", "uniform sampler2D tDiffuse;\nuniform sampler2D tAO, tBloom;\nuniform float uAOk, uBloomK;").replace("gl_FragColor = texture2D( tDiffuse, vUv );", "vec4 texel = texture2D( tDiffuse, vUv );\ntexel.rgb *= mix( vec3( 1.0 ), texture2D( tAO, vUv ).rgb, uAOk );\nvec4 bl = texture2D( tBloom, vUv );\ntexel.rgb += bl.rgb * bl.a * uBloomK;\n" + HDR_SAFE1("texel.rgb") + "\ngl_FragColor = texel;");
+  outPass.needsSwap = false;
   composer.addPass(outPass);
+  // сцена рисуется в readBuffer (у EffectComposer это renderTarget2); MSAA нужен только ему
+  composer.writeBuffer.samples = 0;
   const post = { composer, gtao, bloom };
   // Уровни качества. «Высокое» — исходная картинка: AO в полном разрешении, 16 сэмплов, MSAA 4×,
   // тени 4096/2048. Ниже — те же эффекты дешевле: AO в половинном разрешении с меньшим числом
@@ -381,7 +402,7 @@ function createScene(canvasHost) {
     const q = QUALITY[qi];
     gtao.updateGtaoMaterial({ samples: q.aoS });
     gtao.updatePdMaterial({ samples: q.pdS });
-    for (const t of [composer.renderTarget1, composer.renderTarget2]) if (t.samples !== q.msaa) {
+    for (const t of [composer.readBuffer]) if (t.samples !== q.msaa) {
       t.samples = q.msaa;
       t.dispose();
     }
@@ -396,6 +417,11 @@ function createScene(canvasHost) {
     bloom.threshold = 1.15 / e;
     bloom.strength = night ? 0.55 : 0.22;
     gtao.blendIntensity = night ? 0.4 : 0.85;
+    const aoK = gtao.enabled ? gtao.blendIntensity : 0;
+    hp.uniforms.uAOk.value = aoK;
+    const ou = outPass.material.uniforms;
+    ou.uAOk.value = aoK;
+    ou.uBloomK.value = bloom.enabled ? 1 : 0;
     composer.render();
   };
   const resize = () => {
