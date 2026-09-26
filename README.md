@@ -136,3 +136,10 @@ web: uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
 Живая версия: https://fpsarena.onrender.com
+
+---
+
+## Оружейная (weapons/)
+
+Автономные страницы-«оружейные» восьми стволов со съёмными модулями: `weapons/dist/*.html`.
+Исходники, сборка, оптимизации и тесты производительности — в [`weapons/README.md`](weapons/README.md).

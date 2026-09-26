@@ -1,0 +1,12 @@
+{
+  "name": "fps-arena-weapons",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "bench": "node bench/bench.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}
